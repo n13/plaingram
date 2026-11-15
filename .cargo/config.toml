@@ -1,0 +1,2 @@
+[env]
+TDLIB_DIR = { value = ".tdlib", relative = true }

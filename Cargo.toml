@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["crates/td", "crates/td-gen", "crates/tg-core", "crates/tg-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false

@@ -1,0 +1,10 @@
+[package]
+name = "td-gen"
+description = "tdlib-rs-gen 1.4.0 with recursion detection that follows bare type references"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tdlib-rs-parser = "1.4"
