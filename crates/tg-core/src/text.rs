@@ -54,16 +54,16 @@ const SYMBOLS: [char; 18] = [
     '\u{1F71B}',
 ];
 
-/// Replacements already logged, so each is reported once.
+/// Lines already logged, so each is reported once.
 static REPORTED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reason {
     NotAllowed,
-    /// A `letter` from another alphabet than the first letter of its `word`.
+    /// A `letter` from another alphabet than the `first` letter of its word, or of its name.
     MixedAlphabets {
         letter: &'static str,
-        word: &'static str,
+        first: &'static str,
     },
 }
 
@@ -71,7 +71,7 @@ impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Reason::NotAllowed => f.write_str("not on the allowlist"),
-            Reason::MixedAlphabets { letter, word } => write!(f, "{letter} in a {word} word"),
+            Reason::MixedAlphabets { letter, first } => write!(f, "{letter} in {first} text"),
         }
     }
 }
@@ -151,10 +151,28 @@ pub fn is_allowed(raw: &str) -> bool {
 /// Words are separated by ASCII whitespace. Deliberately no Unicode normalization, so lookalikes such as
 /// fullwidth or mathematical letters stay visible.
 pub fn sanitize(raw: &str) -> SafeText {
+    sanitize_with(raw, true)
+}
+
+/// Like [`sanitize`] for names of people and chats, but the first letter decides the alphabet of the whole name,
+/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too. Logs each flagged name once.
+pub fn sanitize_name(raw: &str) -> SafeText {
+    let name = sanitize_with(raw, false);
+    if name.has_replacements() {
+        report(format!("flagged name: {raw:?}"));
+    }
+    name
+}
+
+fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
     let mut segments = Vec::new();
-    let mut word = None;
+    let mut first = None;
     for grapheme in raw.graphemes(true) {
-        match (special(grapheme, &mut word), segments.last_mut()) {
+        let is_space = grapheme.chars().all(|c| c.is_ascii_whitespace());
+        if per_word && is_space {
+            first = None;
+        }
+        match (if is_space { None } else { special(grapheme, &mut first) }, segments.last_mut()) {
             (Some(segment), _) => segments.push(segment),
             (None, Some(Segment::Text(text))) => text.push_str(grapheme),
             (None, _) => segments.push(Segment::Text(grapheme.into())),
@@ -163,15 +181,11 @@ pub fn sanitize(raw: &str) -> SafeText {
     SafeText(segments)
 }
 
-/// `None` for plain text. `word` is the alphabet of the current word.
-fn special(grapheme: &str, word: &mut Option<&'static str>) -> Option<Segment> {
-    if grapheme.chars().all(|c| c.is_ascii_whitespace()) {
-        *word = None;
-        return None;
-    }
+/// `None` for plain text. `first` is the alphabet of the first letter of the current word or name.
+fn special(grapheme: &str, first: &mut Option<&'static str>) -> Option<Segment> {
     if let Some(letter) = alphabet(grapheme) {
-        let word = *word.get_or_insert(letter);
-        return (letter != word).then(|| replace(grapheme, Reason::MixedAlphabets { letter, word }));
+        let first = *first.get_or_insert(letter);
+        return (letter != first).then(|| replace(grapheme, Reason::MixedAlphabets { letter, first }));
     }
     if grapheme.chars().all(|c| (c.is_ascii_graphic() && !c.is_ascii_alphabetic()) || SYMBOLS.contains(&c)) {
         return None;
@@ -187,11 +201,14 @@ fn alphabet(grapheme: &str) -> Option<&'static str> {
 }
 
 fn replace(grapheme: &str, reason: Reason) -> Segment {
-    let report = format!("{reason}: {} {grapheme:?}", code_points(grapheme));
-    if REPORTED.lock().expect("report lock poisoned").insert(report.clone()) {
-        tracing::info!("{report}");
-    }
+    report(format!("{reason}: {} {grapheme:?}", code_points(grapheme)));
     Segment::Replaced { grapheme: grapheme.into(), reason }
+}
+
+fn report(line: String) {
+    if REPORTED.lock().expect("report lock poisoned").insert(line.clone()) {
+        tracing::info!("{line}");
+    }
 }
 
 /// `U+` notation for each code point, e.g. `U+1F44D U+1F3FD`.
@@ -213,8 +230,8 @@ mod tests {
         Replaced { grapheme: grapheme.into(), reason: Reason::NotAllowed }
     }
 
-    fn mixed(grapheme: &str, letter: &'static str, word: &'static str) -> Segment {
-        Replaced { grapheme: grapheme.into(), reason: Reason::MixedAlphabets { letter, word } }
+    fn mixed(grapheme: &str, letter: &'static str, first: &'static str) -> Segment {
+        Replaced { grapheme: grapheme.into(), reason: Reason::MixedAlphabets { letter, first } }
     }
 
     #[test]
@@ -250,6 +267,15 @@ mod tests {
         assert_eq!(sanitize("(\u{0420}ay) pay").to_string(), "(\u{0420}??) pay");
         assert_eq!(sanitize("Москва/Moscow").to_string(), "Москва/??????");
         assert_eq!(sanitize("我用iPhone 很好").to_string(), "我用?????? 很好");
+    }
+
+    #[test]
+    fn names_take_one_alphabet_across_words() {
+        assert_eq!(sanitize("Alex \u{03A9}").segments(), [text("Alex \u{03A9}")]);
+        assert_eq!(sanitize_name("Alex \u{03A9}").segments(), [text("Alex "), mixed("\u{03A9}", "Greek", "Latin")]);
+        assert_eq!(sanitize_name("\u{0410}lice Smith").to_string(), "\u{0410}???? ?????");
+        assert_eq!(sanitize_name("Андрей Смоляков \u{1F4A6}").to_string(), "Андрей Смоляков \u{1F4A6}");
+        assert_eq!(Reason::MixedAlphabets { letter: "Greek", first: "Latin" }.to_string(), "Greek in Latin text");
     }
 
     #[test]

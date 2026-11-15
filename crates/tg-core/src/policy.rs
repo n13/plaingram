@@ -8,14 +8,14 @@ use crate::model::{
     ChatKind, ChatListId, PhotoRef, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeReply, SafeTopic, SafeUser,
     Sender,
 };
-use crate::text::sanitize;
+use crate::text::{sanitize, sanitize_name};
 
 const MAX_PHOTO_SIDE: i32 = 1280;
 
 /// `forums` holds the supergroup ids of forums.
 pub(crate) fn chat(chat: &types::Chat, bots: &HashSet<i64>, forums: &HashSet<i64>) -> Option<SafeChat> {
     let kind = chat_kind(&chat.r#type, bots, forums)?;
-    Some(SafeChat { id: chat.id, kind, title: sanitize(&chat.title) })
+    Some(SafeChat { id: chat.id, kind, title: sanitize_name(&chat.title) })
 }
 
 fn chat_kind(chat_type: &ChatType, bots: &HashSet<i64>, forums: &HashSet<i64>) -> Option<ChatKind> {
@@ -48,8 +48,8 @@ pub(crate) fn topic(info: &types::ForumTopicInfo) -> SafeTopic {
 pub(crate) fn user(user: &types::User) -> SafeUser {
     SafeUser {
         id: user.id,
-        name: sanitize(format!("{} {}", user.first_name, user.last_name).trim()),
-        username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize(u)),
+        name: sanitize_name(format!("{} {}", user.first_name, user.last_name).trim()),
+        username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize_name(u)),
         is_contact: user.is_contact,
         is_bot: matches!(user.r#type, UserType::Bot(_)),
     }

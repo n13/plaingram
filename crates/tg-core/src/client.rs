@@ -16,7 +16,7 @@ use tokio::runtime::Runtime;
 use crate::image::decode_jpeg;
 use crate::model::{AuthStep, Backend, Event};
 use crate::policy;
-use crate::text::{is_allowed, sanitize};
+use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
 const KEYCHAIN_SERVICE: &str = "plaingram";
@@ -276,7 +276,7 @@ impl Client {
                 }
             }
             Update::ChatTitle(u) if self.is_allowed(u.chat_id) => {
-                self.emit(Event::ChatTitle { chat_id: u.chat_id, title: sanitize(&u.title) });
+                self.emit(Event::ChatTitle { chat_id: u.chat_id, title: sanitize_name(&u.title) });
             }
             Update::ChatPosition(u) if self.is_allowed(u.chat_id) => {
                 self.emit_positions(u.chat_id, std::slice::from_ref(&u.position));

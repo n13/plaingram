@@ -4,7 +4,7 @@ use crate::model::{
     AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeChat, SafeContent, SafeFolder, SafeMessage,
     SafeReply, SafeTopic, SafeUser, Sender,
 };
-use crate::text::{is_allowed, sanitize};
+use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const ME: i64 = 1;
 const HIKING: i64 = 11;
@@ -39,8 +39,8 @@ impl Demo {
         ] {
             self.emit(Event::User(SafeUser {
                 id,
-                name: sanitize(name),
-                username: username.map(sanitize),
+                name: sanitize_name(name),
+                username: username.map(sanitize_name),
                 is_contact,
                 is_bot: false,
             }));
@@ -61,7 +61,7 @@ impl Demo {
             (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 2, vec![main, groups]),
             (FORUM, ChatKind::Forum, "Rust devs", 1, vec![main, groups]),
         ] {
-            self.emit(Event::Chat(SafeChat { id, kind, title: sanitize(title) }));
+            self.emit(Event::Chat(SafeChat { id, kind, title: sanitize_name(title) }));
             for list in lists {
                 self.emit(Event::ChatPosition { chat_id: id, list, order });
             }
