@@ -70,7 +70,7 @@ pub enum Reason {
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Reason::NotAllowed => f.write_str("not on the allowlist"),
+            Reason::NotAllowed => f.write_str("suspicious characters"),
             Reason::MixedAlphabets { letter, first } => write!(f, "{letter} in {first} text"),
         }
     }
