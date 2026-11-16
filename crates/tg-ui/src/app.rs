@@ -390,9 +390,12 @@ impl Plaingram {
         new
     }
 
-    pub(crate) fn open_profile(&mut self, user_id: i64, cx: &mut Context<Self>) {
-        self.profile = Some(user_id);
-        self.client.load_profile(user_id);
+    /// Opens the profile of `user_id`, or closes it when it is the one already open.
+    pub(crate) fn toggle_profile(&mut self, user_id: i64, cx: &mut Context<Self>) {
+        self.profile = (self.profile != Some(user_id)).then_some(user_id);
+        if self.profile.is_some() {
+            self.client.load_profile(user_id);
+        }
         cx.notify();
     }
 
@@ -535,7 +538,7 @@ impl Plaingram {
                 let header = match chat.kind {
                     ChatKind::Private { user_id } | ChatKind::Secret { user_id } => header
                         .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_profile(user_id, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_profile(user_id, cx))),
                     ChatKind::Group | ChatKind::Forum => header,
                 };
                 header.child(name_label(&chat.title, cx))
@@ -669,7 +672,7 @@ impl Plaingram {
                         .gap_2()
                         .cursor_pointer()
                         .hover(|style| style.underline())
-                        .on_click(move |_, _, cx| app.update(cx, |this, cx| this.open_profile(user_id, cx)))
+                        .on_click(move |_, _, cx| app.update(cx, |this, cx| this.toggle_profile(user_id, cx)))
                         .children(name)
                         .child(muted(format!("{} · {time}", self.person_note(user_id)))),
                 )

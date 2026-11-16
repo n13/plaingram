@@ -37,7 +37,7 @@ fn capture_demo_screens() {
             }
         }
         if let Some(user_id) = profile {
-            cx.update(|cx| app.update(cx, |app, cx| app.open_profile(user_id, cx)));
+            cx.update(|cx| app.update(cx, |app, cx| app.toggle_profile(user_id, cx)));
             cx.run_until_parked();
         }
         draw(&mut cx, window);
@@ -176,6 +176,20 @@ fn clicking_a_sender_opens_their_profile() {
     assert_eq!(cx.update(|cx| app.read(cx).profile), Some(4));
 }
 
+#[test]
+fn clicking_the_open_profile_closes_it_and_another_switches_to_it() {
+    let mut cx = headless();
+    let (_, app) = open_demo(&mut cx, true);
+    let mut toggle = |user_id| {
+        cx.update(|cx| app.update(cx, |app, cx| app.toggle_profile(user_id, cx)));
+        cx.update(|cx| app.read(cx).profile)
+    };
+    assert_eq!(toggle(4), Some(4));
+    assert_eq!(toggle(2), Some(2), "another person replaces the open profile");
+    assert_eq!(toggle(2), None, "the same person closes it");
+    assert_eq!(toggle(2), Some(2));
+}
+
 /// The forum's topic tabs are wider than the window; they must fold into a menu so the profile's Close button,
 /// in the top-right corner, stays on screen.
 #[test]
@@ -183,7 +197,7 @@ fn profile_fits_beside_a_forum_with_many_topics() {
     let mut cx = headless();
     let (window, app) = open_demo(&mut cx, true);
     open_chat(&mut cx, &app, FORUM);
-    cx.update(|cx| app.update(cx, |app, cx| app.open_profile(IMPOSTOR, cx)));
+    cx.update(|cx| app.update(cx, |app, cx| app.toggle_profile(IMPOSTOR, cx)));
     draw(&mut cx, window);
     click(&mut cx, window, 1060., 58.);
     assert_eq!(cx.update(|cx| app.read(cx).profile), None);
