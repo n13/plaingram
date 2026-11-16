@@ -23,7 +23,19 @@ const GENERAL_SIZE: i64 = 1000;
 /// A General photo whose download stays at [`SLOW_PHOTO_PROGRESS`], to show the progress bar.
 const SLOW_PHOTO: i32 = 1000;
 const SLOW_PHOTO_PROGRESS: f32 = 0.42;
-const TOPICS: [(i32, &str); 3] = [(GENERAL_TOPIC, "General"), (2, "Announcements \u{1F4E2}"), (3, "Help")];
+const TOPICS: [(i32, &str); 11] = [
+    (GENERAL_TOPIC, "General"),
+    (2, "Announcements \u{1F4E2}"),
+    (3, "Help"),
+    (4, "Tech Support"),
+    (5, "Mining"),
+    (6, "\u{4E2D}\u{6587}"),
+    (7, "Community Projects"),
+    (8, "\u{0420}\u{0443}\u{0441}\u{0441}\u{043A}\u{0438}\u{0439}"),
+    (9, "Speculation"),
+    (10, "Off-Topic"),
+    (11, "Faucet"),
+];
 const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
 
 /// Offline backend with fixed fixtures, for UI development and screenshots. All text goes through [`sanitize`].

@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("cannot open {}", log.display()))?;
     tracing_subscriber::fmt().with_ansi(false).with_writer(std::io::stdout.and(Mutex::new(log))).init();
     let (backend, events) = start_backend()?;
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         if let Err(error) = open(backend, events, cx) {
             tracing::error!("failed to open window: {error:#}");
             cx.quit();

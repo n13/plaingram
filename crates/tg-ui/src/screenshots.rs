@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::Root;
-use gpui_kit::{AppContext as _, Entity, HeadlessAppContext, WindowHandle, px, size};
+use gpui_kit::{
+    AppContext as _, Entity, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput,
+    WindowHandle, point, px, size,
+};
 use tg_core::Demo;
 
 use crate::app::Plaingram;
@@ -23,7 +26,7 @@ fn capture_demo_screens() {
         ("group-chat", true, Some((GROUP_CHAT, None)), None),
         ("forum", true, Some((FORUM, Some(ANNOUNCEMENTS_TOPIC))), None),
         ("forum-general", true, Some((FORUM, None)), None),
-        ("profile", true, Some((GROUP_CHAT, None)), Some(IMPOSTOR)),
+        ("profile", true, Some((FORUM, Some(ANNOUNCEMENTS_TOPIC))), Some(IMPOSTOR)),
     ] {
         let (window, app) = open_demo(&mut cx, signed_in);
         if let Some((chat_id, topic)) = open {
@@ -160,4 +163,39 @@ fn profiles_warn_about_look_alikes_of_contacts() {
     assert_eq!(lookalikes(&mut cx, IMPOSTOR), [2]);
     assert_eq!(lookalikes(&mut cx, 5), [] as [i64; 0]);
     assert_eq!(lookalikes(&mut cx, 4), [] as [i64; 0], "contacts are not flagged");
+}
+
+/// The newest message in the demo group chat is from Bob Jones (4), whose name is at about (330, 554).
+#[test]
+fn clicking_a_sender_opens_their_profile() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    click(&mut cx, window, 330., 554.);
+    assert_eq!(cx.update(|cx| app.read(cx).profile), Some(4));
+}
+
+/// The forum's topic tabs are wider than the window; they must fold into a menu so the profile's Close button,
+/// in the top-right corner, stays on screen.
+#[test]
+fn profile_fits_beside_a_forum_with_many_topics() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, FORUM);
+    cx.update(|cx| app.update(cx, |app, cx| app.open_profile(IMPOSTOR, cx)));
+    draw(&mut cx, window);
+    click(&mut cx, window, 1060., 58.);
+    assert_eq!(cx.update(|cx| app.read(cx).profile), None);
+}
+
+fn click(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, x: f32, y: f32) {
+    let (button, position, modifiers, click_count) = (MouseButton::Left, point(px(x), px(y)), Modifiers::default(), 1);
+    cx.update_window(window.into(), |_, window, cx| {
+        let down = MouseDownEvent { button, position, modifiers, click_count, first_mouse: false };
+        window.dispatch_event(PlatformInput::MouseDown(down), cx);
+        window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count }), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
 }

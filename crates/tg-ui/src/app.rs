@@ -27,6 +27,7 @@ use crate::safe_text::{name_label, safe_text, warning};
 const SIDEBAR_WIDTH: f32 = 300.;
 const CHAT_ROW_HEIGHT: f32 = 56.;
 const PHOTO_MAX_WIDTH: f32 = 360.;
+const PROFILE_PHOTO_WIDTH: f32 = 200.;
 const PROFILE_WIDTH: f32 = 400.;
 /// Once the reader scrolls up, older messages load while fewer than this many are above the viewport.
 const PREFETCH_ROWS: usize = 300;
@@ -530,6 +531,7 @@ impl Plaingram {
         let app = cx.entity();
         v_flex()
             .flex_1()
+            .min_w_0()
             .h_full()
             .child({
                 let header = h_flex().id("chat-header").p_3().border_b_1().border_color(cx.theme().border);
@@ -570,6 +572,7 @@ impl Plaingram {
                             .child(on_screen.absolute().size_full())
                     }
                 })
+                .with_jump_button_renderer(|button| button.label("Latest"))
                 .flex_1(),
             )
             .child(
@@ -618,7 +621,7 @@ impl Plaingram {
                 .gap_1()
                 .child(match compact {
                     true => div().text_color(muted).child("[photo]").into_any_element(),
-                    false => self.render_photo(photo, cx),
+                    false => self.render_photo(photo, PHOTO_MAX_WIDTH, cx),
                 })
                 .when(!caption.is_empty(), |el| el.child(safe_text(caption, cx)))
                 .into_any_element(),
@@ -668,6 +671,7 @@ impl Plaingram {
                         .id(("sender", ix))
                         .gap_2()
                         .cursor_pointer()
+                        .hover(|style| style.underline())
                         .on_click(move |_, _, cx| app.update(cx, |this, cx| this.open_profile(user_id, cx)))
                         .children(name)
                         .child(muted(format!("{} · {time}", self.person_note(user_id)))),
@@ -731,7 +735,7 @@ impl Plaingram {
                     })),
                 ),
             )
-            .when_some(profile.and_then(|p| p.photo.as_ref()), |el, photo| el.child(self.render_photo(photo, cx)))
+            .when_some(profile.and_then(|p| p.photo.as_ref()), |el, photo| el.child(self.render_photo(photo, PROFILE_PHOTO_WIDTH, cx)))
             .when_some(user, |el, user| {
                 el.child(name_label(&user.name, cx))
                     .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
@@ -756,8 +760,8 @@ impl Plaingram {
             })
     }
 
-    fn render_photo(&self, photo: &PhotoRef, cx: &App) -> AnyElement {
-        let scale = (PHOTO_MAX_WIDTH / photo.width as f32).min(1.);
+    fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
+        let scale = (max_width / photo.width as f32).min(1.);
         let (width, height) = (px(photo.width as f32 * scale), px(photo.height as f32 * scale));
         match self.photos.get(&photo.file_id) {
             Some(image) => img(ImageSource::Render(image.clone())).w(width).h(height).into_any_element(),
