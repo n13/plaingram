@@ -1,0 +1,103 @@
+name: Build and release
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            asset: plaingram-macos-arm64.zip
+          - os: ubuntu-22.04
+            asset: plaingram-linux-x86_64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build tools
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install gperf openssl@3
+          else
+            sudo apt-get update
+            sudo apt-get install -y gperf pkg-config libssl-dev zlib1g-dev libxkbcommon-x11-dev libwayland-dev \
+              libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
+          fi
+
+      - name: Restore TDLib
+        id: tdlib
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tdlib/install
+          key: tdlib-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-tdlib.sh') }}
+
+      - name: Build TDLib
+        if: steps.tdlib.outputs.cache-hit != 'true'
+        run: ./scripts/build-tdlib.sh
+
+      - name: Save TDLib
+        if: steps.tdlib.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tdlib/install
+          key: ${{ steps.tdlib.outputs.cache-primary-key }}
+
+      - name: Test and build
+        env:
+          PLAINGRAM_API_ID: ${{ startsWith(github.ref, 'refs/tags/') && secrets.PLAINGRAM_API_ID || '' }}
+          PLAINGRAM_API_HASH: ${{ startsWith(github.ref, 'refs/tags/') && secrets.PLAINGRAM_API_HASH || '' }}
+        run: |
+          if [ -z "$PLAINGRAM_API_ID" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::Release builds need the PLAINGRAM_API_ID and PLAINGRAM_API_HASH repository secrets"
+              exit 1
+            fi
+            unset PLAINGRAM_API_ID PLAINGRAM_API_HASH
+          fi
+          cargo test --workspace --release
+          ./scripts/bundle.sh
+
+      - name: Package
+        run: |
+          mkdir dist
+          if [ "$RUNNER_OS" = macOS ]; then
+            ditto -c -k --keepParent target/release/plaingram.app "dist/${{ matrix.asset }}"
+          else
+            tar -C target/release -czf "dist/${{ matrix.asset }}" plaingram-linux
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "plaingram $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md --generate-notes

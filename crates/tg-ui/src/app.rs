@@ -26,7 +26,7 @@ const API_SETUP_STEPS: [&str; 4] = [
     "Telegram requires every app to have its own API ID. This is a one-time setup:",
     "1. Sign in at my.telegram.org and open API development tools.",
     "2. Create an app: title and short name plaingram, platform Desktop.",
-    "3. Paste its api_id and api_hash below. They are stored in the macOS Keychain.",
+    "3. Paste its api_id and api_hash below. They are stored in your system keychain.",
 ];
 
 pub struct Plaingram {

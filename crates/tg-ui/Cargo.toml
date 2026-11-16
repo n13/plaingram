@@ -22,7 +22,9 @@ demo = ["tg-core/demo"]
 
 [dev-dependencies]
 gpui-kit = { version = "0.9", features = ["test-support"] }
-gpui_apple = { version = "=0.3.12", package = "gpui-pre-apple" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = "0.46"
 tg-core = { path = "../tg-core", features = ["demo"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { version = "=0.3.12", package = "gpui-pre-apple" }

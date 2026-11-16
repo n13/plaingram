@@ -4,6 +4,7 @@ mod demo;
 mod emoji;
 mod image;
 mod model;
+mod paths;
 mod policy;
 mod text;
 
@@ -15,4 +16,5 @@ pub use model::{
     AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeChat, SafeContent, SafeFolder, SafeMessage,
     SafeReply, SafeTopic, SafeUser, Sender,
 };
+pub use paths::log_file;
 pub use text::{Reason, SafeText, Segment, code_points, is_allowed, sanitize};

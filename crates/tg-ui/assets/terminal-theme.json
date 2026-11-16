@@ -1,9 +1,7 @@
 {
   "name": "Terminal",
   "mode": "dark",
-  "font.family": "Menlo",
   "font.size": 14,
-  "mono_font.family": "Menlo",
   "mono_font.size": 14,
   "radius": 0,
   "radius.lg": 0,

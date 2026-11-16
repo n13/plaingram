@@ -29,7 +29,14 @@ static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().expect("failed to start tokio runtime")
 });
 
-/// The app's own api_id/api_hash from my.telegram.org, kept in the Keychain.
+/// Release builds bake in the project's API credentials from these variables at compile time.
+const BUILT_IN: Option<(&str, &str)> = match (option_env!("PLAINGRAM_API_ID"), option_env!("PLAINGRAM_API_HASH")) {
+    (Some(id), Some(hash)) => Some((id, hash)),
+    (None, None) => None,
+    _ => panic!("set both PLAINGRAM_API_ID and PLAINGRAM_API_HASH, or neither"),
+};
+
+/// The app's api_id/api_hash from my.telegram.org: entered by the user and kept in the keychain, or [`BUILT_IN`].
 struct ApiCredentials {
     id: i32,
     hash: String,
@@ -45,7 +52,9 @@ impl ApiCredentials {
     }
 
     fn load() -> Result<Option<Self>> {
-        let Some(stored) = keychain_read(KEYCHAIN_API_CREDENTIALS)? else { return Ok(None) };
+        let Some(stored) = keychain_read(KEYCHAIN_API_CREDENTIALS)? else {
+            return BUILT_IN.map(|(id, hash)| Self::parse(id, hash)).transpose();
+        };
         let (id, hash) =
             std::str::from_utf8(&stored)?.split_once(':').context("stored API credentials are malformed")?;
         Self::parse(id, hash).map(Some)
@@ -76,8 +85,7 @@ pub struct Client {
 impl Client {
     pub fn start() -> Result<(Self, Events)> {
         td::set_log_verbosity(1).map_err(td_error)?;
-        let home = std::env::var("HOME").context("HOME is not set")?;
-        let data_dir = PathBuf::from(home).join("Library/Application Support/plaingram");
+        let data_dir = crate::paths::data_dir()?;
         let (events, receiver) = async_channel::unbounded();
         let client = Self { id: td::create_client(), data_dir, events, allowed: Arc::default() };
         let worker = client.clone();
@@ -103,8 +111,13 @@ impl Backend for Client {
         self.spawn(async move {
             match functions::set_authentication_phone_number(phone, None, id).await {
                 Err(e) if e.message == "API_ID_INVALID" => {
-                    keychain(KEYCHAIN_API_CREDENTIALS)?.delete_credential()?;
-                    bail!("Telegram rejected the API ID and hash; restart plaingram to enter them again")
+                    match keychain(KEYCHAIN_API_CREDENTIALS)?.delete_credential() {
+                        Ok(()) => bail!("Telegram rejected the API ID and hash; restart plaingram to enter them again"),
+                        Err(keyring::Error::NoEntry) => {
+                            bail!("Telegram rejected the API ID built into this copy of plaingram; get a newer release")
+                        }
+                        Err(e) => Err(e.into()),
+                    }
                 }
                 result => result.map_err(td_error),
             }

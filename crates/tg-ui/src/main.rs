@@ -1,20 +1,21 @@
 mod app;
 mod safe_text;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod screenshots;
 mod theme;
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
-use tg_core::{Backend, Events};
+use tg_core::{Backend, Events, log_file};
 use tracing_subscriber::fmt::writer::MakeWriterExt as _;
 
 fn main() -> Result<()> {
-    let log = std::env::home_dir().context("no home directory")?.join("Library/Logs/plaingram.log");
+    let log = log_file()?;
+    fs::create_dir_all(log.parent().context("log file has no folder")?)?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)

@@ -9,30 +9,29 @@ Unofficial, allowlist-only desktop client for the Telegram API: 1:1, secret and 
 - Allowed chats: private (non-bot), secret, basic groups, supergroups that are not channels; forum supergroups show their topics as tabs. Allowed content: text, photos, group service events, and a quote of the message each reply refers to. Anything else renders as `[hidden: <kind>]`.
 - Photos: TDLib photo sizes up to 1280px, JPEG only (magic bytes checked), decoded by `zune-jpeg` built without SIMD, so the decoder crate is `#![forbid(unsafe_code)]`. GPUI only receives decoded pixels.
 - Outgoing text must pass the same allowlist; link previews are always disabled.
-- The TDLib database is encrypted with a random key stored in the macOS Keychain.
+- The TDLib database is encrypted with a random key stored in the system keychain (macOS Keychain, or the Secret Service on Linux: GNOME Keyring or KWallet).
 
 ## Layout
 
 - `crates/td`: Rust bindings generated at build time from the `td_api.tl` of the TDLib commit pinned in `scripts/build-tdlib.sh`, linked statically (TDLib + OpenSSL), so the binary has no TDLib dylib to swap. Upgrading TDLib means bumping `TD_COMMIT` and rebuilding.
 - `crates/td-gen`: vendored `tdlib-rs-gen` 1.4.0 (MIT/Apache-2.0) with a recursion fix needed by TDLib 1.8.70 (`richTextButton` refers to `inlineButton` as a bare type).
 - `crates/tg-core`: allowlist policy, sanitizer, JPEG decoding, TDLib client. The `demo` feature adds an offline `Demo` backend with fixture chats (impostor names, homoglyph links, hidden stickers).
-- `crates/tg-ui`: GPUI app with a green-on-black terminal theme (`assets/terminal-theme.json`, Menlo, which keeps `0`/`O` and `1`/`l`/`I` distinct).
+- `crates/tg-ui`: GPUI app with a green-on-black terminal theme (`assets/terminal-theme.json`) in a monospace font (Menlo on macOS, DejaVu Sans Mono on Linux) that keeps `0`/`O`, `1`/`l`/`I` and `rn`/`m` apart.
 
-## Run
+## Download
+
+Releases for macOS (Apple Silicon) and Linux (x86_64) are on the [Releases page](../../releases), with install notes. They are built from the tagged source by GitHub Actions (`.github/workflows/release.yml`) and include plaingram's Telegram API ID, so they sign in right away. Create your account and finish any email or registration steps in the official app first.
+
+## Build from source
+
+macOS needs Xcode command line tools and `brew install cmake gperf openssl@3 jq`. Ubuntu 22.04 or newer needs `sudo apt install build-essential cmake gperf pkg-config libssl-dev zlib1g-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev`. Rust is installed by `rustup` from `rust-toolchain.toml`.
 
 ```sh
-./scripts/build-tdlib.sh   # builds TDLib 1.8.70 from source into .tdlib/
-cargo run -p tg-ui
+./scripts/build-tdlib.sh   # builds TDLib 1.8.70 and OpenSSL-linked static libraries into .tdlib/install
+./scripts/bundle.sh        # macOS: target/release/plaingram.app, Linux: target/release/plaingram-linux/
 ```
 
-As a Mac app with its icon (`crates/tg-ui/assets/icon.svg`):
-
-```sh
-./scripts/bundle.sh           # release build, icon, Info.plist, signed with your Apple Development certificate
-open target/release/plaingram.app
-```
-
-On first launch the app asks for its API ID and hash (create an app at https://my.telegram.org, API development tools) and stores them in the Keychain, then signs in with phone, code and 2FA password. Create the account and finish any email/registration steps in the official app first.
+A build from source has no API ID built in. On first launch it asks for one: create an app at https://my.telegram.org (API development tools) and paste its api_id and api_hash, which are stored in the system keychain. To build in an ID instead, set `PLAINGRAM_API_ID` and `PLAINGRAM_API_HASH` when building. Release builds get them from the repository secrets of the same names, and a tag push fails if they are missing; pull request builds never include them.
 
 ## Develop
 
@@ -41,4 +40,4 @@ cargo run -p tg-ui --features demo   # offline UI with fixture data, no account 
 cargo test --workspace               # includes a headless GPUI render of the demo screens
 ```
 
-The screenshot test renders off-screen through Metal and writes `target/screenshots/*.png`; it needs no Screen Recording permission.
+The screenshot test (macOS only) renders off-screen through Metal and writes `target/screenshots/*.png`; it needs no Screen Recording permission. The app logs to `~/Library/Logs/plaingram.log` on macOS and `~/.local/state/plaingram/plaingram.log` on Linux.

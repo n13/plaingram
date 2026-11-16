@@ -29,7 +29,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TDLIB_DIR");
     let tdlib =
         PathBuf::from(env::var("TDLIB_DIR").expect("TDLIB_DIR must point at the output of scripts/build-tdlib.sh"));
-    let schema = tdlib.join("src/td/generate/scheme/td_api.tl");
+    let schema = tdlib.join("install/td_api.tl");
     println!("cargo:rerun-if-changed={}", schema.display());
     let source = fs::read_to_string(&schema).unwrap_or_else(|e| panic!("cannot read {}: {e}", schema.display()));
     let builtins =
@@ -46,7 +46,8 @@ fn main() {
         println!("cargo:rustc-link-lib=static={lib}");
     }
     println!("cargo:rustc-link-lib=dylib=z");
-    println!("cargo:rustc-link-lib=dylib=c++");
+    let cxx = if env::var("CARGO_CFG_TARGET_OS").unwrap() == "macos" { "c++" } else { "stdc++" };
+    println!("cargo:rustc-link-lib=dylib={cxx}");
 }
 
 fn parse(source: String) -> (Vec<Definition>, usize) {
