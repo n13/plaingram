@@ -41,3 +41,7 @@ cargo test --workspace               # includes a headless GPUI render of the de
 ```
 
 The screenshot test (macOS only) renders off-screen through Metal and writes `target/screenshots/*.png`; it needs no Screen Recording permission. The app logs to `~/Library/Logs/plaingram.log` on macOS and `~/.local/state/plaingram/plaingram.log` on Linux.
+
+## License
+
+MIT, see [LICENSE](LICENSE). `crates/td-gen` keeps its original MIT OR Apache-2.0 license, and release builds statically link TDLib (Boost Software License 1.0) and OpenSSL (Apache-2.0).
