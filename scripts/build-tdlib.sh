@@ -15,4 +15,5 @@ git -C "$DIR/src" checkout -q --detach FETCH_HEAD
 cmake -S "$DIR/src" -B "$DIR/build" -DCMAKE_BUILD_TYPE=Release \
   -DOPENSSL_ROOT_DIR="$OPENSSL" -DCMAKE_INSTALL_PREFIX="$DIR/install"
 cmake --build "$DIR/build" --target install -j "$(getconf _NPROCESSORS_ONLN)"
-cp "$OPENSSL_LIB/libssl.a" "$OPENSSL_LIB/libcrypto.a" "$DIR/src/td/generate/scheme/td_api.tl" "$DIR/install/"
+cp "$OPENSSL_LIB/libssl.a" "$OPENSSL_LIB/libcrypto.a" "$DIR/install/lib/"
+cp "$DIR/src/td/generate/scheme/td_api.tl" "$DIR/install/"
