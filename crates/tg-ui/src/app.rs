@@ -24,6 +24,8 @@ use crate::safe_text::{name_label, safe_text};
 const SIDEBAR_WIDTH: f32 = 300.;
 const CHAT_ROW_HEIGHT: f32 = 56.;
 const PHOTO_MAX_WIDTH: f32 = 360.;
+/// Once the reader scrolls up, older messages load while fewer than this many are above the viewport.
+const PREFETCH_ROWS: usize = 300;
 const API_SETUP_STEPS: [&str; 4] = [
     "Telegram requires every app to have its own API ID. This is a one-time setup:",
     "1. Sign in at my.telegram.org and open API development tools.",
@@ -37,7 +39,7 @@ pub struct Plaingram {
     login: Entity<InputState>,
     api_hash: Entity<InputState>,
     compose: Entity<InputState>,
-    scroller: Entity<MessageScrollerState>,
+    pub(crate) scroller: Entity<MessageScrollerState>,
     users: HashMap<i64, SafeUser>,
     chats: HashMap<i64, SafeChat>,
     positions: HashMap<ChatListId, HashMap<i64, i64>>,
@@ -48,7 +50,8 @@ pub struct Plaingram {
     /// Topics of the open chat if it is a forum.
     topics: Vec<SafeTopic>,
     topic: Option<i32>,
-    messages: Vec<SafeMessage>,
+    pub(crate) messages: Vec<SafeMessage>,
+    older: Older,
     /// What each message in `messages` replies to, by message id.
     replies: HashMap<i64, SafeReply>,
     photos: HashMap<i32, Arc<RenderImage>>,
@@ -56,8 +59,16 @@ pub struct Plaingram {
     error: Option<SafeText>,
     /// When each frame of the last second was rendered, for the FPS counter.
     frames: VecDeque<Instant>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
     _tasks: [Task<()>; 2],
+}
+
+/// Whether messages older than the loaded ones can still be fetched.
+#[derive(Clone, Copy, PartialEq)]
+enum Older {
+    Available,
+    Loading,
+    Exhausted,
 }
 
 impl Plaingram {
@@ -65,6 +76,7 @@ impl Plaingram {
         let login = cx.new(|cx| InputState::new(window, cx));
         let api_hash = cx.new(|cx| InputState::new(window, cx).placeholder("API hash").masked(true));
         let compose = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
+        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let on_enter = |action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             move |this: &mut Self,
                   _: &Entity<InputState>,
@@ -80,6 +92,7 @@ impl Plaingram {
             cx.subscribe_in(&login, window, on_enter(Self::submit_login)),
             cx.subscribe_in(&api_hash, window, on_enter(Self::submit_login)),
             cx.subscribe_in(&compose, window, on_enter(Self::send)),
+            cx.observe(&scroller, |this, _, cx| this.prefetch(cx)),
         ];
         let events = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events.recv().await {
@@ -102,7 +115,7 @@ impl Plaingram {
             login,
             api_hash,
             compose,
-            scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            scroller,
             users: HashMap::new(),
             chats: HashMap::new(),
             positions: HashMap::new(),
@@ -113,6 +126,7 @@ impl Plaingram {
             topics: Vec::new(),
             topic: None,
             messages: Vec::new(),
+            older: Older::Available,
             replies: HashMap::new(),
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
@@ -154,7 +168,19 @@ impl Plaingram {
                 self.request_photos(&messages);
                 let count = messages.len();
                 self.messages = messages;
+                self.older = Older::Available;
                 self.scroller.update(cx, |scroller, cx| scroller.reset(count, cx));
+            }
+            Event::OlderHistory { chat_id, topic, before, messages }
+                if self.open_chat == Some(chat_id)
+                    && self.topic == topic
+                    && self.messages.first().map(|m| m.id) == Some(before) =>
+            {
+                self.request_photos(&messages);
+                self.older = if messages.is_empty() { Older::Exhausted } else { Older::Available };
+                let count = messages.len();
+                self.messages.splice(0..0, messages);
+                self.scroller.update(cx, |scroller, cx| _ = scroller.prepend(count, cx));
             }
             Event::Topics { chat_id, topics } if self.open_chat == Some(chat_id) => {
                 self.topics = topics;
@@ -190,6 +216,7 @@ impl Plaingram {
             },
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
+            | Event::OlderHistory { .. }
             | Event::Topics { .. }
             | Event::Topic { .. }
             | Event::Reply { .. }
@@ -264,9 +291,22 @@ impl Plaingram {
     fn clear_history(&mut self, topic: Option<i32>, cx: &mut Context<Self>) {
         self.topic = topic;
         self.messages.clear();
+        self.older = Older::Available;
         self.replies.clear();
         self.scroller.update(cx, |scroller, cx| scroller.reset(0, cx));
         cx.notify();
+    }
+
+    /// Requests older messages once the reader has scrolled up to within [`PREFETCH_ROWS`] of the oldest.
+    fn prefetch(&mut self, cx: &mut Context<Self>) {
+        let scroller = self.scroller.read(cx);
+        let near_top = scroller.is_scrolled_up() && scroller.logical_scroll_top().item_ix < PREFETCH_ROWS;
+        if let (true, Older::Available, Some(chat_id), Some(oldest)) =
+            (near_top, self.older, self.open_chat, self.messages.first())
+        {
+            self.older = Older::Loading;
+            self.client.load_older(chat_id, self.topic, oldest.id);
+        }
     }
 
     fn show_error(&mut self, message: &str) {

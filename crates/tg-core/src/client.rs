@@ -19,6 +19,8 @@ use crate::policy;
 use crate::text::{is_allowed, report, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
+const OLDER_SIZE: usize = 100;
+const TDLIB_PAGE_LIMIT: usize = 100;
 const KEYCHAIN_SERVICE: &str = "plaingram";
 const KEYCHAIN_DB_KEY: &str = "tdlib-database-key";
 const KEYCHAIN_API_CREDENTIALS: &str = "api-credentials";
@@ -139,23 +141,21 @@ impl Backend for Client {
         self.spawn(async move {
             this.ensure_allowed(chat_id)?;
             functions::open_chat(chat_id, this.id).await.map_err(td_error)?;
-            let mut history = Vec::new();
-            let mut from = 0;
-            while history.len() < HISTORY_SIZE {
-                let limit = HISTORY_SIZE as i32;
-                let page = match topic {
-                    Some(topic) => functions::get_forum_topic_history(chat_id, topic, from, 0, limit, this.id).await,
-                    None => functions::get_chat_history(chat_id, from, 0, limit, false, this.id).await,
-                };
-                let Messages::Messages(page) = page.map_err(td_error)?;
-                let page: Vec<_> = page.messages.into_iter().flatten().collect();
-                let Some(last) = page.last() else { break };
-                from = last.id;
-                history.extend(page);
-            }
-            history.reverse();
+            let history = this.history(chat_id, topic, 0, HISTORY_SIZE).await?;
             this.mark_read_now(chat_id, history.iter().map(|m| m.id).collect()).await?;
             this.emit(Event::History { chat_id, topic, messages: history.iter().map(policy::message).collect() });
+            history.iter().for_each(|message| this.load_reply(message));
+            Ok(())
+        });
+    }
+
+    fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            let history = this.history(chat_id, topic, before, OLDER_SIZE).await?;
+            let messages = history.iter().map(policy::message).collect();
+            this.emit(Event::OlderHistory { chat_id, topic, before, messages });
             history.iter().for_each(|message| this.load_reply(message));
             Ok(())
         });
@@ -219,6 +219,31 @@ impl Backend for Client {
 }
 
 impl Client {
+    /// Up to `count` messages older than `from` (0 for the newest), oldest first.
+    async fn history(
+        &self,
+        chat_id: i64,
+        topic: Option<i32>,
+        mut from: i64,
+        count: usize,
+    ) -> Result<Vec<types::Message>> {
+        let mut history = Vec::new();
+        while history.len() < count {
+            let limit = (count - history.len()).min(TDLIB_PAGE_LIMIT).try_into()?;
+            let page = match topic {
+                Some(topic) => functions::get_forum_topic_history(chat_id, topic, from, 0, limit, self.id).await,
+                None => functions::get_chat_history(chat_id, from, 0, limit, false, self.id).await,
+            };
+            let Messages::Messages(page) = page.map_err(td_error)?;
+            let page: Vec<_> = page.messages.into_iter().flatten().collect();
+            let Some(last) = page.last() else { break };
+            from = last.id;
+            history.extend(page);
+        }
+        history.reverse();
+        Ok(history)
+    }
+
     async fn mark_read_now(&self, chat_id: i64, message_ids: Vec<i64>) -> Result<()> {
         self.ensure_allowed(chat_id)?;
         functions::view_messages(chat_id, message_ids, None, true, self.id).await.map_err(td_error)

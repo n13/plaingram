@@ -12,7 +12,10 @@ const ME: i64 = 1;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const DEMO_SPACING: i32 = 5 * 3600;
-const TOPICS: [(i32, &str); 3] = [(1, "General"), (2, "Announcements \u{1F4E2}"), (3, "Help")];
+const GENERAL_TOPIC: i32 = 1;
+/// Messages in the forum's General topic, enough to scroll back through.
+const GENERAL_SIZE: i64 = 1000;
+const TOPICS: [(i32, &str); 3] = [(GENERAL_TOPIC, "General"), (2, "Announcements \u{1F4E2}"), (3, "Help")];
 const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
 
 /// Offline backend with fixed fixtures, for UI development and screenshots. All text goes through [`sanitize`].
@@ -105,6 +108,14 @@ impl Backend for Demo {
         }
     }
 
+    fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64) {
+        let messages = match (chat_id, topic) {
+            (FORUM, Some(GENERAL_TOPIC)) => general(before, 100),
+            _ => Vec::new(),
+        };
+        self.emit(Event::OlderHistory { chat_id, topic, before, messages });
+    }
+
     fn load_topics(&self, chat_id: i64) {
         let topics = TOPICS.map(|(id, name)| SafeTopic { id, name: sanitize(name) }).into();
         self.emit(Event::Topics { chat_id, topics });
@@ -132,6 +143,9 @@ impl Backend for Demo {
 }
 
 fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
+    if (chat_id, topic) == (FORUM, Some(GENERAL_TOPIC)) {
+        return general(GENERAL_SIZE + 1, 50);
+    }
     let text = |s: &str| SafeContent::Text(sanitize(s));
     let entries = match chat_id {
         HIKING => vec![
@@ -156,6 +170,18 @@ fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
         .zip(1..)
         .map(|((from, content), id)| {
             message(chat_id, topic, id.into(), from, content, now - 120 - (count - id) * DEMO_SPACING)
+        })
+        .collect()
+}
+
+/// Up to `count` messages of the General topic before message `before`; message `id` is `GENERAL_SIZE - id` ten-minute steps old.
+fn general(before: i64, count: i64) -> Vec<SafeMessage> {
+    let now = now();
+    ((before - count).max(1)..before)
+        .map(|id| {
+            let date = now - i32::try_from(GENERAL_SIZE - id).expect("General is small") * 600;
+            let content = SafeContent::Text(sanitize(&format!("General message {id}")));
+            message(FORUM, Some(GENERAL_TOPIC), id, if id % 2 == 0 { 2 } else { 4 }, content, date)
         })
         .collect()
 }

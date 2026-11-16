@@ -125,6 +125,13 @@ pub enum Event {
         topic: Option<i32>,
         messages: Vec<SafeMessage>,
     },
+    /// Messages older than message `before`, oldest first; empty at the start of the history.
+    OlderHistory {
+        chat_id: i64,
+        topic: Option<i32>,
+        before: i64,
+        messages: Vec<SafeMessage>,
+    },
     /// A forum's topics in display order.
     Topics {
         chat_id: i64,
@@ -160,6 +167,8 @@ pub trait Backend {
     fn submit_password(&self, password: String);
     /// Loads the history of a chat, or of one topic in a forum.
     fn open_chat(&self, chat_id: i64, topic: Option<i32>);
+    /// Loads messages older than message `before`, as an [`Event::OlderHistory`].
+    fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64);
     fn load_topics(&self, chat_id: i64);
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
