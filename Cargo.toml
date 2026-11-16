@@ -6,3 +6,6 @@ members = ["crates/td", "crates/td-gen", "crates/tg-core", "crates/tg-ui"]
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[profile.release]
+strip = true
