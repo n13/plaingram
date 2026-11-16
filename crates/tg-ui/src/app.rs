@@ -78,8 +78,6 @@ pub struct Plaingram {
     /// When each recent frame was drawn and its top row, for the scroll velocity.
     scroll_samples: VecDeque<(Instant, usize)>,
     error: Option<SafeText>,
-    /// When each frame of the last second was rendered, for the FPS counter.
-    frames: VecDeque<Instant>,
     _subscriptions: [Subscription; 4],
     _tasks: [Task<()>; 2],
 }
@@ -124,7 +122,7 @@ impl Plaingram {
         });
         let clock = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(60)).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     return;
                 }
@@ -158,7 +156,6 @@ impl Plaingram {
             visible_rows: Rc::default(),
             scroll_samples: VecDeque::new(),
             error: None,
-            frames: VecDeque::new(),
             _subscriptions: subscriptions,
             _tasks: [events, clock],
         }
@@ -800,11 +797,6 @@ impl Render for Plaingram {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.visible_rows.set(None);
         cx.defer_in(window, |this, _, cx| this.load_photos_in_view(cx));
-        let now = Instant::now();
-        self.frames.push_back(now);
-        while self.frames.front().is_some_and(|&frame| now - frame > Duration::from_secs(1)) {
-            self.frames.pop_front();
-        }
         let body = match self.auth {
             Some(AuthStep::Ready) => h_flex()
                 .flex_1()
@@ -820,18 +812,7 @@ impl Render for Plaingram {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .pr_3()
-                        .justify_between()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("plaingram")
-                        .child(format!("{} fps", self.frames.len())),
-                ),
-            )
+            .child(TitleBar::new().child(div().text_sm().text_color(cx.theme().muted_foreground).child("plaingram")))
             .when_some(self.error.as_ref(), |el, error| {
                 el.child(
                     h_flex()
