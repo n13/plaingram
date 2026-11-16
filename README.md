@@ -16,6 +16,7 @@ I am pretty confident impersonation particularly becomes impossible with the las
 - Allowed chats: private (non-bot), secret, basic groups, supergroups that are not channels; forum supergroups show their topics as tabs. Allowed content: text, photos, group service events, and a quote of the message each reply refers to. Anything else renders as `[hidden: <kind>]`.
 - Photos: TDLib photo sizes up to 1280px, JPEG only (magic bytes checked), decoded by `zune-jpeg` built without SIMD, so the decoder crate is `#![forbid(unsafe_code)]`. GPUI only receives decoded pixels.
 - Outgoing text must pass the same allowlist; link previews are always disabled.
+- Profiles: clicking a sender, or a private chat's header, opens their profile with the same badges on name and handle, a warning when a stranger's name or handle looks like a contact's (ignoring case, punctuation, `0`/`o`, `1`/`l`/`i` and `rn`/`m`), Telegram's SCAM/FAKE labels, and dates of profile photos. Registration month, phone country and the last rename only appear for strangers who messaged you first, because Telegram shares them nowhere else.
 - The TDLib database is encrypted with a random key stored in the system keychain (macOS Keychain, or the Secret Service on Linux: GNOME Keyring or KWallet).
 
 ## Layout

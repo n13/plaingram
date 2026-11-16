@@ -7,8 +7,8 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, Chat, ChatList, Chats, File, ForumTopics, InputMessageContent, Message, MessageReplyTo,
-    MessageTopic, Messages, Update,
+    AuthorizationState, Chat, ChatActionBar, ChatList, ChatPhotos, Chats, File, ForumTopics, InputMessageContent,
+    Message, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
@@ -216,6 +216,20 @@ impl Backend for Client {
             Ok(())
         });
     }
+
+    fn load_profile(&self, user_id: i64) {
+        let id = self.id;
+        let this = self.clone();
+        self.spawn(async move {
+            let User::User(user) = functions::get_user(user_id, id).await.map_err(td_error)?;
+            let UserFullInfo::UserFullInfo(full) =
+                functions::get_user_full_info(user_id, id).await.map_err(td_error)?;
+            let ChatPhotos::ChatPhotos(photos) =
+                functions::get_user_profile_photos(user_id, 0, 100, id).await.map_err(td_error)?;
+            this.emit(Event::Profile(policy::profile(&user, &full, &photos)));
+            Ok(())
+        });
+    }
 }
 
 impl Client {
@@ -314,7 +328,11 @@ impl Client {
                 if let Some(chat) = chat {
                     self.emit(Event::Chat(chat));
                     self.emit_positions(u.chat.id, &u.chat.positions);
+                    self.emit_account_info(u.chat.id, u.chat.action_bar.as_ref());
                 }
+            }
+            Update::ChatActionBar(u) if self.is_allowed(u.chat_id) => {
+                self.emit_account_info(u.chat_id, u.action_bar.as_ref());
             }
             Update::ChatTitle(u) if self.is_allowed(u.chat_id) => {
                 self.emit(Event::ChatTitle { chat_id: u.chat_id, title: sanitize_name(&u.title) });
@@ -415,6 +433,16 @@ impl Client {
     fn fail(&self, error: anyhow::Error) {
         tracing::error!("{error:#}");
         self.emit(Event::Error(sanitize(&format!("{error:#}"))));
+    }
+
+    /// Emits what Telegram's bar for a stranger's private chat says about them. A private chat has its user's id.
+    fn emit_account_info(&self, chat_id: i64, bar: Option<&ChatActionBar>) {
+        if chat_id > 0
+            && let Some(ChatActionBar::ReportAddBlock(bar)) = bar
+            && let Some(info) = &bar.account_info
+        {
+            self.emit(Event::AccountInfo { user_id: chat_id, info: policy::account_info(info) });
+        }
     }
 
     fn emit_positions(&self, chat_id: i64, positions: &[types::ChatPosition]) {

@@ -60,6 +60,32 @@ pub struct SafeUser {
     pub is_bot: bool,
 }
 
+/// What a profile shows beyond [`SafeUser`], for judging whether an account is who it claims to be.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SafeProfile {
+    pub user_id: i64,
+    pub bio: SafeText,
+    /// The current profile photo.
+    pub photo: Option<PhotoRef>,
+    /// When each profile photo was set, newest first, from the first page of them.
+    pub photo_dates: Vec<i32>,
+    pub photo_count: i32,
+    pub groups_in_common: i32,
+    /// Telegram's labels, such as "Premium", "SCAM" or "unofficial app".
+    pub labels: Vec<&'static str>,
+}
+
+/// What Telegram shares about someone who messaged you first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SafeAccountInfo {
+    /// Month (1 to 12) and year the account was registered.
+    pub registered: Option<(u32, i32)>,
+    /// Two-letter country code of the phone number; empty if unknown.
+    pub phone_country: SafeText,
+    pub name_changed: Option<i32>,
+    pub photo_changed: Option<i32>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sender {
     User(i64),
@@ -161,6 +187,11 @@ pub enum Event {
         file_id: i32,
         image: DecodedImage,
     },
+    Profile(SafeProfile),
+    AccountInfo {
+        user_id: i64,
+        info: SafeAccountInfo,
+    },
     Error(SafeText),
 }
 
@@ -178,4 +209,6 @@ pub trait Backend {
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     fn load_photo(&self, file_id: i32);
+    /// Loads a user's full profile, as an [`Event::Profile`].
+    fn load_profile(&self, user_id: i64);
 }

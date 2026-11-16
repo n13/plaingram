@@ -12,16 +12,18 @@ const GROUP_CHAT: i64 = 11;
 const FORUM: i64 = 15;
 const ANNOUNCEMENTS_TOPIC: usize = 1;
 const GROUPS_FOLDER: usize = 2;
+const IMPOSTOR: i64 = 3;
 
 #[test]
 fn capture_demo_screens() {
     let mut cx = headless();
     std::fs::create_dir_all(SCREENSHOT_DIR).unwrap();
-    for (name, signed_in, open) in [
-        ("setup", false, None),
-        ("group-chat", true, Some((GROUP_CHAT, None))),
-        ("forum", true, Some((FORUM, Some(ANNOUNCEMENTS_TOPIC)))),
-        ("forum-general", true, Some((FORUM, None))),
+    for (name, signed_in, open, profile) in [
+        ("setup", false, None, None),
+        ("group-chat", true, Some((GROUP_CHAT, None)), None),
+        ("forum", true, Some((FORUM, Some(ANNOUNCEMENTS_TOPIC))), None),
+        ("forum-general", true, Some((FORUM, None)), None),
+        ("profile", true, Some((GROUP_CHAT, None)), Some(IMPOSTOR)),
     ] {
         let (window, app) = open_demo(&mut cx, signed_in);
         if let Some((chat_id, topic)) = open {
@@ -30,6 +32,10 @@ fn capture_demo_screens() {
                 cx.update(|cx| app.update(cx, |app, cx| app.select_topic(topic, cx)));
                 cx.run_until_parked();
             }
+        }
+        if let Some(user_id) = profile {
+            cx.update(|cx| app.update(cx, |app, cx| app.open_profile(user_id, cx)));
+            cx.run_until_parked();
         }
         draw(&mut cx, window);
         let path = format!("{SCREENSHOT_DIR}/{name}.png");
@@ -140,4 +146,18 @@ fn top_id(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>) -> i64 {
 
 fn scroll_to(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>, ix: usize) {
     cx.update(|cx| app.update(cx, |app, cx| app.scroller.update(cx, |s, cx| assert!(s.scroll_to_item(ix, cx)))));
+}
+
+/// Demo user 6 copies the name of the contact Bob Jones (4); the impostor (3) copies the handle of Alice Smith (2).
+#[test]
+fn profiles_warn_about_look_alikes_of_contacts() {
+    let mut cx = headless();
+    let (_, app) = open_demo(&mut cx, true);
+    let lookalikes = |cx: &mut HeadlessAppContext, user_id| {
+        cx.update(|cx| app.read(cx).lookalikes(user_id).iter().map(|user| user.id).collect::<Vec<_>>())
+    };
+    assert_eq!(lookalikes(&mut cx, 6), [4]);
+    assert_eq!(lookalikes(&mut cx, IMPOSTOR), [2]);
+    assert_eq!(lookalikes(&mut cx, 5), [] as [i64; 0]);
+    assert_eq!(lookalikes(&mut cx, 4), [] as [i64; 0], "contacts are not flagged");
 }

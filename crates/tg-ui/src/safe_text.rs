@@ -25,11 +25,12 @@ pub fn name_label(name: &SafeText, cx: &App) -> Div {
                 Reason::MixedAlphabets { .. } => grapheme.to_string(),
             })
             .collect();
-        div().px_1().text_xs().bg(cx.theme().danger).text_color(cx.theme().danger_foreground).child(format!(
-            "{}: {}",
-            group[0].0,
-            graphemes.join(" ")
-        ))
+        warning(format!("{}: {}", group[0].0, graphemes.join(" ")), cx)
     });
     h_flex().gap_2().child(safe_text(name, cx)).children(warnings)
+}
+
+/// A red warning badge.
+pub fn warning(text: String, cx: &App) -> Div {
+    div().px_1().text_xs().bg(cx.theme().danger).text_color(cx.theme().danger_foreground).child(text)
 }

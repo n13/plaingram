@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -17,15 +17,17 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
-    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, Event, Events, PhotoRef, SafeChat, SafeContent, SafeFolder,
-    SafeMessage, SafeReply, SafeText, SafeTopic, SafeUser, Sender, is_allowed, sanitize,
+    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, Event, Events, PhotoRef, SafeAccountInfo, SafeChat,
+    SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic, SafeUser, Sender, is_allowed,
+    sanitize,
 };
 
-use crate::safe_text::{name_label, safe_text};
+use crate::safe_text::{name_label, safe_text, warning};
 
 const SIDEBAR_WIDTH: f32 = 300.;
 const CHAT_ROW_HEIGHT: f32 = 56.;
 const PHOTO_MAX_WIDTH: f32 = 360.;
+const PROFILE_WIDTH: f32 = 400.;
 /// Once the reader scrolls up, older messages load while fewer than this many are above the viewport.
 const PREFETCH_ROWS: usize = 300;
 /// Photos load this long before the scroll velocity brings them on screen.
@@ -65,6 +67,11 @@ pub struct Plaingram {
     photos: HashMap<i32, Arc<RenderImage>>,
     pub(crate) requested_photos: HashSet<i32>,
     pub(crate) photo_progress: HashMap<i32, f32>,
+    /// The user whose profile is open beside the chat.
+    pub(crate) profile: Option<i64>,
+    profiles: HashMap<i64, SafeProfile>,
+    /// What Telegram shared about people who messaged first, by user id.
+    account_info: HashMap<i64, SafeAccountInfo>,
     /// The first and last rows on screen in the frame being drawn.
     visible_rows: Rc<Cell<Option<(usize, usize)>>>,
     /// When each recent frame was drawn and its top row, for the scroll velocity.
@@ -144,6 +151,9 @@ impl Plaingram {
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
             photo_progress: HashMap::new(),
+            profile: None,
+            profiles: HashMap::new(),
+            account_info: HashMap::new(),
             visible_rows: Rc::default(),
             scroll_samples: VecDeque::new(),
             error: None,
@@ -233,6 +243,13 @@ impl Plaingram {
                     Err(error) => self.show_error(&format!("{error:#}")),
                 }
             }
+            Event::Profile(profile) => {
+                if let Some(photo) = &profile.photo {
+                    self.request_photo(photo.file_id);
+                }
+                self.profiles.insert(profile.user_id, profile);
+            }
+            Event::AccountInfo { user_id, info } => _ = self.account_info.insert(user_id, info),
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
             | Event::OlderHistory { .. }
@@ -350,18 +367,50 @@ impl Plaingram {
             false => first..last + 1 + ahead,
         };
         let rows = rows.start.min(self.messages.len())..rows.end.min(self.messages.len());
+        let photos: Vec<_> = self.messages[rows]
+            .iter()
+            .filter_map(|message| match &message.content {
+                SafeContent::Photo { photo, .. } => Some(photo.file_id),
+                _ => None,
+            })
+            .collect();
         let mut requested = false;
-        for message in &self.messages[rows] {
-            if let SafeContent::Photo { photo, .. } = &message.content
-                && self.requested_photos.insert(photo.file_id)
-            {
-                self.client.load_photo(photo.file_id);
-                requested = true;
-            }
+        for file_id in photos {
+            requested |= self.request_photo(file_id);
         }
         if requested {
             cx.notify();
         }
+    }
+
+    /// Starts downloading a photo unless it was requested before; returns whether it did.
+    fn request_photo(&mut self, file_id: i32) -> bool {
+        let new = self.requested_photos.insert(file_id);
+        if new {
+            self.client.load_photo(file_id);
+        }
+        new
+    }
+
+    pub(crate) fn open_profile(&mut self, user_id: i64, cx: &mut Context<Self>) {
+        self.profile = Some(user_id);
+        self.client.load_profile(user_id);
+        cx.notify();
+    }
+
+    /// Contacts whose name or handle looks like the name or handle of `user_id`, when that user is not a contact.
+    pub(crate) fn lookalikes(&self, user_id: i64) -> Vec<&SafeUser> {
+        let Some(user) = self.users.get(&user_id).filter(|user| !user.is_contact) else { return Vec::new() };
+        let skeletons = |u: &SafeUser| -> Vec<String> {
+            [Some(&u.name), u.username.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|text| skeleton(&text.to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let suspect = skeletons(user);
+        self.users.values().filter(|c| c.is_contact && skeletons(c).iter().any(|s| suspect.contains(s))).collect()
     }
 
     fn folder(&self) -> ChatListId {
@@ -482,7 +531,16 @@ impl Plaingram {
         v_flex()
             .flex_1()
             .h_full()
-            .child(h_flex().p_3().border_b_1().border_color(cx.theme().border).child(name_label(&chat.title, cx)))
+            .child({
+                let header = h_flex().id("chat-header").p_3().border_b_1().border_color(cx.theme().border);
+                let header = match chat.kind {
+                    ChatKind::Private { user_id } | ChatKind::Secret { user_id } => header
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_profile(user_id, cx))),
+                    ChatKind::Group | ChatKind::Forum => header,
+                };
+                header.child(name_label(&chat.title, cx))
+            })
             .when(!self.topics.is_empty(), |el| {
                 let selected = self.topics.iter().position(|t| Some(t.id) == self.topic).unwrap_or_default();
                 el.child(tab_bar(
@@ -508,7 +566,7 @@ impl Plaingram {
                         );
                         div()
                             .relative()
-                            .child(app.read(cx).render_message(ix, cx))
+                            .child(app.read(cx).render_message(ix, &app, cx))
                             .child(on_screen.absolute().size_full())
                     }
                 })
@@ -531,14 +589,14 @@ impl Plaingram {
             .into_any_element()
     }
 
-    fn render_message(&self, ix: usize, cx: &App) -> AnyElement {
+    fn render_message(&self, ix: usize, app: &Entity<Self>, cx: &App) -> AnyElement {
         let Some(message) = self.messages.get(ix) else { return div().into_any_element() };
         let bubble = if message.outgoing { cx.theme().accent } else { cx.theme().secondary };
         v_flex()
             .px_4()
             .py_1()
             .map(|el| if message.outgoing { el.items_end() } else { el.items_start() })
-            .child(self.render_sender(message, cx))
+            .child(self.render_sender(ix, message, app, cx))
             .child(
                 v_flex()
                     .max_w(px(520.))
@@ -593,19 +651,109 @@ impl Plaingram {
         }
     }
 
-    fn render_sender(&self, message: &SafeMessage, cx: &App) -> Div {
+    /// Clicking a person's name opens their profile.
+    fn render_sender(&self, ix: usize, message: &SafeMessage, app: &Entity<Self>, cx: &App) -> Div {
         let time = timestamp(message.date, Local::now());
         let row = h_flex().gap_2().text_xs();
         let muted = |text: String| div().text_color(cx.theme().muted_foreground).child(text);
         if message.outgoing {
             return row.child("You").child(muted(time));
         }
-        let note = match message.sender {
-            Sender::User(id) => self.person_note(id),
-            Sender::Chat(id) => format!("chat {id}"),
-        };
-        row.children(self.sender_name(message.sender).map(|name| name_label(name, cx)))
-            .child(muted(format!("{note} · {time}")))
+        let name = self.sender_name(message.sender).map(|name| name_label(name, cx));
+        match message.sender {
+            Sender::User(user_id) => {
+                let app = app.clone();
+                row.child(
+                    h_flex()
+                        .id(("sender", ix))
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| app.update(cx, |this, cx| this.open_profile(user_id, cx)))
+                        .children(name)
+                        .child(muted(format!("{} · {time}", self.person_note(user_id)))),
+                )
+            }
+            Sender::Chat(chat_id) => row.children(name).child(muted(format!("chat {chat_id} · {time}"))),
+        }
+    }
+
+    /// Who someone is and how established their account looks, beside the chat.
+    fn render_profile(&self, user_id: i64, cx: &mut Context<Self>) -> Stateful<Div> {
+        let muted = cx.theme().muted_foreground;
+        let (user, profile, info) =
+            (self.users.get(&user_id), self.profiles.get(&user_id), self.account_info.get(&user_id));
+        let now = Local::now();
+        let unknown = || "unknown".to_string();
+        let loading = || "loading...".to_string();
+        let photo_changed = info.and_then(|i| i.photo_changed).or(profile.and_then(|p| p.photo_dates.first().copied()));
+        let facts = [
+            (
+                "Registered",
+                info.and_then(|i| i.registered).map_or_else(unknown, |(month, year)| month_year(month, year)),
+            ),
+            (
+                "Phone country",
+                info.map(|i| i.phone_country.to_string()).filter(|c| !c.is_empty()).unwrap_or_else(unknown),
+            ),
+            ("Renamed", info.and_then(|i| i.name_changed).map_or_else(unknown, |date| age(date, now))),
+            ("Photo changed", photo_changed.map_or_else(unknown, |date| age(date, now))),
+            (
+                "Profile photos",
+                profile.map_or_else(loading, |p| match p.photo_dates.last() {
+                    Some(&first) => format!("{}, first {}", p.photo_count, age(first, now)),
+                    None => "none".into(),
+                }),
+            ),
+            ("Groups in common", profile.map_or_else(loading, |p| p.groups_in_common.to_string())),
+            ("User ID", user_id.to_string()),
+        ];
+        let (alarms, labels): (Vec<_>, Vec<_>) = profile
+            .map(|p| p.labels.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .partition(|l| matches!(**l, "SCAM" | "FAKE"));
+        let status = user.map(|u| if u.is_contact { "contact" } else { "not a contact" }).into_iter();
+        v_flex()
+            .id("profile")
+            .overflow_y_scroll()
+            .w(px(PROFILE_WIDTH))
+            .flex_none()
+            .h_full()
+            .p_3()
+            .gap_3()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex().justify_between().text_color(muted).child("Profile").child(
+                    Button::new("close-profile").label("Close").on_click(cx.listener(|this, _, _, cx| {
+                        this.profile = None;
+                        cx.notify();
+                    })),
+                ),
+            )
+            .when_some(profile.and_then(|p| p.photo.as_ref()), |el, photo| el.child(self.render_photo(photo, cx)))
+            .when_some(user, |el, user| {
+                el.child(name_label(&user.name, cx))
+                    .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
+            })
+            .child(div().text_xs().text_color(muted).child(status.chain(labels.into_iter().copied()).collect::<Vec<_>>().join(" · ")))
+            .children(alarms.into_iter().map(|label| warning(format!("Telegram marks this account {label}"), cx)))
+            .children(self.lookalikes(user_id).into_iter().map(|contact| {
+                let handle = contact.username.as_ref().map_or_else(|| format!("id {}", contact.id), |u| format!("@{u}"));
+                warning(format!("looks like your contact {} ({handle})", contact.name), cx)
+            }))
+            .when_some(profile.filter(|p| !p.bio.is_empty()), |el, p| el.child(safe_text(&p.bio, cx)))
+            .children(facts.into_iter().map(|(label, value)| {
+                h_flex()
+                    .gap_2()
+                    .child(div().w(px(150.)).flex_none().text_color(muted).child(label))
+                    .child(div().flex_1().min_w_0().child(value))
+            }))
+            .when(info.is_none(), |el| {
+                el.child(div().text_xs().text_color(muted).child(
+                    "Telegram shares registration date, phone country and renames only for people who message you first.",
+                ))
+            })
     }
 
     fn render_photo(&self, photo: &PhotoRef, cx: &App) -> AnyElement {
@@ -659,6 +807,7 @@ impl Render for Plaingram {
                 .min_h_0()
                 .child(self.render_chats(cx))
                 .child(self.render_conversation(cx))
+                .when_some(self.profile, |el, user_id| el.child(self.render_profile(user_id, cx)))
                 .into_any_element(),
             _ => self.render_login(cx).into_any_element(),
         };
@@ -726,19 +875,45 @@ fn timestamp(date: i32, now: DateTime<Local>) -> String {
         ..60 => "just now".into(),
         60..3600 => format!("{}m ago", age / 60),
         3600..86400 => format!("{}h ago", age / 3600),
-        _ => DateTime::from_timestamp(date.into(), 0)
-            .expect("every i32 timestamp is in range")
-            .with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M")
-            .to_string(),
+        _ => local(date).format("%Y-%m-%d %H:%M").to_string(),
     }
+}
+
+/// A past date and how many days ago it was, for spotting new accounts and fresh renames.
+fn age(date: i32, now: DateTime<Local>) -> String {
+    match (now.timestamp() - i64::from(date)) / 86400 {
+        ..1 => timestamp(date, now),
+        1 => format!("{} (1 day ago)", local(date).format("%Y-%m-%d")),
+        days => format!("{} ({days} days ago)", local(date).format("%Y-%m-%d")),
+    }
+}
+
+/// Folds case, punctuation and look-alike characters, so "a1ice_smith_" and "Alice Smith" compare equal.
+fn skeleton(text: &str) -> String {
+    let text = text.to_lowercase().replace("rn", "m");
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'i' => 'l',
+            c => c,
+        })
+        .collect()
+}
+
+fn month_year(month: u32, year: i32) -> String {
+    NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1 to 12").format("%B %Y").to_string()
+}
+
+fn local(date: i32) -> DateTime<Local> {
+    DateTime::from_timestamp(date.into(), 0).expect("every i32 timestamp is in range").with_timezone(&Local)
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::timestamp;
+    use super::{skeleton, timestamp};
 
     #[test]
     fn timestamps_are_relative_for_a_day_then_absolute() {
@@ -752,5 +927,15 @@ mod tests {
         assert_eq!(ago(86399), "23h ago");
         let absolute = ago(86400);
         assert!(absolute.starts_with("2027-01-1") && absolute.len() == 16, "{absolute}");
+    }
+
+    #[test]
+    fn skeletons_fold_look_alike_names_and_handles() {
+        assert_eq!(skeleton("Alice Smith"), skeleton("alice_smith_"));
+        assert_eq!(skeleton("a1ice.smith"), skeleton("AIice Smith"));
+        assert_eq!(skeleton("B0b Jones"), skeleton("bobjones"));
+        assert_eq!(skeleton("Mike"), skeleton("rnike"));
+        assert_ne!(skeleton("Alice Smith"), skeleton("Alice Smyth"));
+        assert_eq!(skeleton("\u{1F60A} ???"), "");
     }
 }

@@ -5,8 +5,8 @@ use td::enums::{ChatList, ChatType, MessageContent, MessageOrigin, MessageSender
 use td::types;
 
 use crate::model::{
-    ChatKind, ChatListId, PhotoRef, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeReply, SafeTopic, SafeUser,
-    Sender,
+    ChatKind, ChatListId, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile,
+    SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{sanitize, sanitize_name};
 
@@ -52,6 +52,37 @@ pub(crate) fn user(user: &types::User) -> SafeUser {
         username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize_name(u)),
         is_contact: user.is_contact,
         is_bot: matches!(user.r#type, UserType::Bot(_)),
+    }
+}
+
+pub(crate) fn profile(user: &types::User, full: &types::UserFullInfo, photos: &types::ChatPhotos) -> SafeProfile {
+    let status = user.verification_status.as_ref();
+    let labels = [
+        (user.is_premium, "Premium"),
+        (status.is_some_and(|s| s.is_verified), "verified"),
+        (status.is_some_and(|s| s.is_scam), "SCAM"),
+        (status.is_some_and(|s| s.is_fake), "FAKE"),
+        (full.uses_unofficial_app, "unofficial app"),
+    ];
+    SafeProfile {
+        user_id: user.id,
+        bio: sanitize(full.bio.as_ref().map_or("", |bio| &bio.text)),
+        photo: full.photo.as_ref().and_then(|p| photo(&p.sizes)),
+        photo_dates: photos.photos.iter().map(|p| p.added_date).collect(),
+        photo_count: photos.total_count,
+        groups_in_common: full.group_in_common_count,
+        labels: labels.into_iter().filter_map(|(on, label)| on.then_some(label)).collect(),
+    }
+}
+
+pub(crate) fn account_info(info: &types::AccountInfo) -> SafeAccountInfo {
+    let date = |date: i32| (date > 0).then_some(date);
+    let month = u32::try_from(info.registration_month).ok().filter(|m| (1..=12).contains(m));
+    SafeAccountInfo {
+        registered: month.zip((info.registration_year > 0).then_some(info.registration_year)),
+        phone_country: sanitize(&info.phone_number_country_code),
+        name_changed: date(info.last_name_change_date),
+        photo_changed: date(info.last_photo_change_date),
     }
 }
 
@@ -113,7 +144,7 @@ fn content(content: &MessageContent) -> SafeContent {
     let service = |text: String| SafeContent::Service(sanitize(&text));
     match content {
         MessageContent::MessageText(t) => SafeContent::Text(sanitize(&t.text.text)),
-        MessageContent::MessagePhoto(p) => match photo(&p.photo) {
+        MessageContent::MessagePhoto(p) => match photo(&p.photo.sizes) {
             Some(photo) => SafeContent::Photo { photo, caption: sanitize(&p.caption.text) },
             None => hidden(content),
         },
@@ -135,8 +166,9 @@ fn content(content: &MessageContent) -> SafeContent {
     }
 }
 
-fn photo(photo: &types::Photo) -> Option<PhotoRef> {
-    photo.sizes.iter().filter(|s| s.width.max(s.height) <= MAX_PHOTO_SIDE).max_by_key(|s| s.width).map(|s| PhotoRef {
+/// The largest size within [`MAX_PHOTO_SIDE`].
+fn photo(sizes: &[types::PhotoSize]) -> Option<PhotoRef> {
+    sizes.iter().filter(|s| s.width.max(s.height) <= MAX_PHOTO_SIDE).max_by_key(|s| s.width).map(|s| PhotoRef {
         file_id: s.photo.id,
         width: s.width,
         height: s.height,
@@ -264,5 +296,19 @@ mod tests {
         }));
         let SafeContent::Service(text) = content else { panic!("{content:?}") };
         assert_eq!(text.to_string(), "renamed the group to \u{0410}?????");
+    }
+
+    #[test]
+    fn account_info_drops_unknown_values() {
+        let info = account_info(&types::AccountInfo {
+            registration_month: 0,
+            registration_year: 2024,
+            phone_number_country_code: "NG".into(),
+            last_name_change_date: 1_800_000_000,
+            last_photo_change_date: 0,
+        });
+        assert_eq!(info.registered, None);
+        assert_eq!(info.phone_country.to_string(), "NG");
+        assert_eq!((info.name_changed, info.photo_changed), (Some(1_800_000_000), None));
     }
 }

@@ -3,12 +3,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
-    AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeChat, SafeContent, SafeFolder, SafeMessage,
-    SafeReply, SafeTopic, SafeUser, Sender,
+    AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFolder,
+    SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const ME: i64 = 1;
+/// "Alice Smith" with a Cyrillic "А", posing as the contact Alice Smith (user 2).
+const IMPOSTOR: i64 = 3;
+const DAY: i32 = 24 * 3600;
+/// Profile photos have this plus the user id as file id.
+const PROFILE_PHOTOS: i32 = 2000;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const DEMO_SPACING: i32 = 5 * 3600;
@@ -42,8 +47,9 @@ impl Demo {
         self.emit(Event::Auth(AuthStep::Ready));
         for (id, name, username, is_contact) in [
             (2, "Alice Smith", Some("alice_smith"), true),
-            (3, "\u{0410}lice Smith", Some("alice_smith_"), false),
+            (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
             (4, "Bob Jones", Some("bobj"), true),
+            (6, "Bob Jones", Some("bobjones_support"), false),
             (5, "P\u{0430}ypal Support", None, false),
         ] {
             self.emit(Event::User(SafeUser {
@@ -54,6 +60,15 @@ impl Demo {
                 is_bot: false,
             }));
         }
+        self.emit(Event::AccountInfo {
+            user_id: IMPOSTOR,
+            info: SafeAccountInfo {
+                registered: Some((11, 2026)),
+                phone_country: sanitize("NG"),
+                name_changed: Some(now() - 2 * DAY),
+                photo_changed: Some(now() - DAY),
+            },
+        });
         self.emit(Event::Folders {
             folders: vec![
                 SafeFolder { id: 1, name: sanitize("Friends \u{1F60A}") },
@@ -109,6 +124,25 @@ impl Backend for Demo {
         if let Some(reply) = reply {
             self.emit(Event::Reply { chat_id, message_id: 10, reply });
         }
+    }
+
+    fn load_profile(&self, user_id: i64) {
+        let now = now();
+        let (bio, photo_dates, groups_in_common, labels) = match user_id {
+            2 => ("Trail runner and coffee snob \u{2615}", vec![now - 200 * DAY, now - 1100 * DAY], 3, vec!["Premium"]),
+            IMPOSTOR => ("Crypto investor. DM me for deals", vec![now - DAY], 1, vec!["unofficial app"]),
+            _ => ("", Vec::new(), 1, Vec::new()),
+        };
+        let file_id = PROFILE_PHOTOS + i32::try_from(user_id).expect("demo user ids are small");
+        self.emit(Event::Profile(SafeProfile {
+            user_id,
+            bio: sanitize(bio),
+            photo: (!photo_dates.is_empty()).then_some(PhotoRef { file_id, ..PHOTO }),
+            photo_count: photo_dates.len().try_into().expect("few photos"),
+            photo_dates,
+            groups_in_common,
+            labels,
+        }));
     }
 
     fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64) {
