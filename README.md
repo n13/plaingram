@@ -1,6 +1,13 @@
 # plaingram
 
-Unofficial, allowlist-only desktop client for the Telegram API: 1:1, secret and group chats with text and photos. Everything else is hidden.
+Unofficial, super minimal Telegram client for Mac/Linux; Security first.
+
+Design goals:
+- Text and images, groups, and folders work
+- Reduce attack surface by removing mini apps, bots, animations, etc
+- Prevent impersonation and scammers by flagging all suspicious names, e.g. mixed alphabet and weird unicode characters
+
+I am pretty confident impersonation particularly becomes impossible with the last feature, the impersonator will just end up with a bunch of ?? in their username and a big red warning label.
 
 ## Security model
 
