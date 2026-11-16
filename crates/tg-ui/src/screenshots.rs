@@ -21,6 +21,7 @@ fn capture_demo_screens() {
         ("setup", false, None),
         ("group-chat", true, Some((GROUP_CHAT, None))),
         ("forum", true, Some((FORUM, Some(ANNOUNCEMENTS_TOPIC)))),
+        ("forum-general", true, Some((FORUM, None))),
     ] {
         let (window, app) = open_demo(&mut cx, signed_in);
         if let Some((chat_id, topic)) = open {
@@ -45,29 +46,20 @@ fn scrolling_up_prefetches_older_messages() {
     open_chat(&mut cx, &app, FORUM);
     draw(&mut cx, window);
     let loaded = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).messages.len());
-    let top_id = |cx: &mut HeadlessAppContext| {
-        cx.update(|cx| {
-            let app = app.read(cx);
-            app.messages[app.scroller.read(cx).logical_scroll_top().item_ix].id
-        })
-    };
-    let scroll_to = |cx: &mut HeadlessAppContext, ix: usize| {
-        cx.update(|cx| app.update(cx, |app, cx| app.scroller.update(cx, |s, cx| assert!(s.scroll_to_item(ix, cx)))));
-    };
     assert_eq!(loaded(&mut cx), 50, "nothing loads before the reader scrolls");
 
-    scroll_to(&mut cx, 10);
-    let anchor = top_id(&mut cx);
+    scroll_to(&mut cx, &app, 10);
+    let anchor = top_id(&mut cx, &app);
     draw(&mut cx, window);
     assert_eq!(loaded(&mut cx), 350, "three pages load ahead of the reader");
-    assert_eq!(top_id(&mut cx), anchor, "the reader stays on the same message");
+    assert_eq!(top_id(&mut cx, &app), anchor, "the reader stays on the same message");
 
-    while top_id(&mut cx) > 1 {
-        scroll_to(&mut cx, 0);
+    while top_id(&mut cx, &app) > 1 {
+        scroll_to(&mut cx, &app, 0);
         draw(&mut cx, window);
     }
     assert_eq!(loaded(&mut cx), 1000);
-    scroll_to(&mut cx, 0);
+    scroll_to(&mut cx, &app, 0);
     draw(&mut cx, window);
     assert_eq!(loaded(&mut cx), 1000, "loading stops at the first message");
 }
@@ -112,4 +104,40 @@ fn draw(cx: &mut HeadlessAppContext, window: WindowHandle<Root>) {
         cx.advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
     }
+}
+
+/// The demo General topic has a photo every tenth message; the newest one is on screen at open.
+#[test]
+fn photos_load_only_on_or_approaching_the_screen() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, FORUM);
+    draw(&mut cx, window);
+    let requested = |cx: &mut HeadlessAppContext| {
+        let mut ids: Vec<i64> = cx.update(|cx| app.read(cx).requested_photos.iter().map(|&id| id.into()).collect());
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(requested(&mut cx), [1000], "only the photo on screen loads");
+    assert_eq!(cx.update(|cx| app.read(cx).photo_progress.get(&1000).copied()), Some(0.42));
+
+    scroll_to(&mut cx, &app, 10);
+    draw(&mut cx, window);
+    let (top, requested) = (top_id(&mut cx, &app), requested(&mut cx));
+    assert!(
+        requested.iter().any(|&id| id < top),
+        "photos above load ahead of an upward scroll: {requested:?}, top {top}"
+    );
+    assert!(requested.iter().all(|&id| id + 31 >= top), "photos far above do not load: {requested:?}, top {top}");
+}
+
+fn top_id(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>) -> i64 {
+    cx.update(|cx| {
+        let app = app.read(cx);
+        app.messages[app.scroller.read(cx).logical_scroll_top().item_ix].id
+    })
+}
+
+fn scroll_to(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>, ix: usize) {
+    cx.update(|cx| app.update(cx, |app, cx| app.scroller.update(cx, |s, cx| assert!(s.scroll_to_item(ix, cx)))));
 }

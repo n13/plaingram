@@ -152,6 +152,11 @@ pub enum Event {
         old_id: i64,
         message: SafeMessage,
     },
+    /// How much of a requested photo has downloaded, from 0 to 1.
+    PhotoProgress {
+        file_id: i32,
+        progress: f32,
+    },
     Photo {
         file_id: i32,
         image: DecodedImage,

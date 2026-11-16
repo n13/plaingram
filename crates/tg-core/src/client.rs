@@ -346,6 +346,9 @@ impl Client {
             Update::MessageSendSucceeded(u) if self.is_allowed(u.message.chat_id) => {
                 self.emit(Event::MessageSent { old_id: u.old_message_id, message: policy::message(&u.message) });
             }
+            Update::File(u) if u.file.local.is_downloading_active => {
+                self.emit(Event::PhotoProgress { file_id: u.file.id, progress: policy::download_progress(&u.file) });
+            }
             Update::MessageSendFailed(u) => bail!("sending failed: {}", u.error.message),
             _ => {}
         }

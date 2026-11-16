@@ -15,6 +15,9 @@ const DEMO_SPACING: i32 = 5 * 3600;
 const GENERAL_TOPIC: i32 = 1;
 /// Messages in the forum's General topic, enough to scroll back through.
 const GENERAL_SIZE: i64 = 1000;
+/// A General photo whose download stays at [`SLOW_PHOTO_PROGRESS`], to show the progress bar.
+const SLOW_PHOTO: i32 = 1000;
+const SLOW_PHOTO_PROGRESS: f32 = 0.42;
 const TOPICS: [(i32, &str); 3] = [(GENERAL_TOPIC, "General"), (2, "Announcements \u{1F4E2}"), (3, "Help")];
 const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
 
@@ -132,6 +135,9 @@ impl Backend for Demo {
     }
 
     fn load_photo(&self, file_id: i32) {
+        if file_id == SLOW_PHOTO {
+            return self.emit(Event::PhotoProgress { file_id, progress: SLOW_PHOTO_PROGRESS });
+        }
         let (width, height) = (PHOTO.width as u32, PHOTO.height as u32);
         let bgra = (0..height)
             .flat_map(|y| {
@@ -174,13 +180,20 @@ fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
         .collect()
 }
 
-/// Up to `count` messages of the General topic before message `before`; message `id` is `GENERAL_SIZE - id` ten-minute steps old.
+/// Up to `count` messages of the General topic before message `before`; message `id` is `GENERAL_SIZE - id` ten-minute steps old, and every tenth is a photo with file id `id`.
 fn general(before: i64, count: i64) -> Vec<SafeMessage> {
     let now = now();
     ((before - count).max(1)..before)
         .map(|id| {
             let date = now - i32::try_from(GENERAL_SIZE - id).expect("General is small") * 600;
-            let content = SafeContent::Text(sanitize(&format!("General message {id}")));
+            let text = sanitize(&format!("General message {id}"));
+            let content = match id % 10 {
+                0 => SafeContent::Photo {
+                    photo: PhotoRef { file_id: id.try_into().expect("General is small"), ..PHOTO },
+                    caption: text,
+                },
+                _ => SafeContent::Text(text),
+            };
             message(FORUM, Some(GENERAL_TOPIC), id, if id % 2 == 0 { 2 } else { 4 }, content, date)
         })
         .collect()

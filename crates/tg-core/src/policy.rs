@@ -55,6 +55,11 @@ pub(crate) fn user(user: &types::User) -> SafeUser {
     }
 }
 
+pub(crate) fn download_progress(file: &types::File) -> f32 {
+    let size = if file.size > 0 { file.size } else { file.expected_size };
+    (file.local.downloaded_size as f32 / size.max(1) as f32).clamp(0., 1.)
+}
+
 pub(crate) fn full_name(user: &types::User) -> String {
     format!("{} {}", user.first_name, user.last_name).trim().to_owned()
 }

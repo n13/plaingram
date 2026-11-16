@@ -1,6 +1,8 @@
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,12 @@ const CHAT_ROW_HEIGHT: f32 = 56.;
 const PHOTO_MAX_WIDTH: f32 = 360.;
 /// Once the reader scrolls up, older messages load while fewer than this many are above the viewport.
 const PREFETCH_ROWS: usize = 300;
+/// Photos load this long before the scroll velocity brings them on screen.
+const PHOTO_LOOKAHEAD: Duration = Duration::from_secs(1);
+/// The most rows ahead whose photos load, so a scrollbar jump does not fetch a whole chat.
+const PHOTO_LOOKAHEAD_ROWS: usize = 30;
+/// How far back scroll positions count toward the scroll velocity.
+const VELOCITY_WINDOW: Duration = Duration::from_millis(300);
 const API_SETUP_STEPS: [&str; 4] = [
     "Telegram requires every app to have its own API ID. This is a one-time setup:",
     "1. Sign in at my.telegram.org and open API development tools.",
@@ -55,7 +63,12 @@ pub struct Plaingram {
     /// What each message in `messages` replies to, by message id.
     replies: HashMap<i64, SafeReply>,
     photos: HashMap<i32, Arc<RenderImage>>,
-    requested_photos: HashSet<i32>,
+    pub(crate) requested_photos: HashSet<i32>,
+    pub(crate) photo_progress: HashMap<i32, f32>,
+    /// The first and last rows on screen in the frame being drawn.
+    visible_rows: Rc<Cell<Option<(usize, usize)>>>,
+    /// When each recent frame was drawn and its top row, for the scroll velocity.
+    scroll_samples: VecDeque<(Instant, usize)>,
     error: Option<SafeText>,
     /// When each frame of the last second was rendered, for the FPS counter.
     frames: VecDeque<Instant>,
@@ -130,6 +143,9 @@ impl Plaingram {
             replies: HashMap::new(),
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
+            photo_progress: HashMap::new(),
+            visible_rows: Rc::default(),
+            scroll_samples: VecDeque::new(),
             error: None,
             frames: VecDeque::new(),
             _subscriptions: subscriptions,
@@ -165,10 +181,10 @@ impl Plaingram {
                 self.sort_chats();
             }
             Event::History { chat_id, topic, messages } if self.open_chat == Some(chat_id) && self.topic == topic => {
-                self.request_photos(&messages);
                 let count = messages.len();
                 self.messages = messages;
                 self.older = Older::Available;
+                self.scroll_samples.clear();
                 self.scroller.update(cx, |scroller, cx| scroller.reset(count, cx));
             }
             Event::OlderHistory { chat_id, topic, before, messages }
@@ -176,9 +192,9 @@ impl Plaingram {
                     && self.topic == topic
                     && self.messages.first().map(|m| m.id) == Some(before) =>
             {
-                self.request_photos(&messages);
                 self.older = if messages.is_empty() { Older::Exhausted } else { Older::Available };
                 let count = messages.len();
+                self.scroll_samples.iter_mut().for_each(|(_, top)| *top += count);
                 self.messages.splice(0..0, messages);
                 self.scroller.update(cx, |scroller, cx| _ = scroller.prepend(count, cx));
             }
@@ -198,7 +214,6 @@ impl Plaingram {
                 self.replies.insert(message_id, reply);
             }
             Event::Message(message) if self.open_chat == Some(message.chat_id) && self.topic == message.topic => {
-                self.request_photos(std::slice::from_ref(&message));
                 if !message.outgoing {
                     self.client.mark_read(message.chat_id, vec![message.id]);
                 }
@@ -210,10 +225,14 @@ impl Plaingram {
                     *slot = message;
                 }
             }
-            Event::Photo { file_id, image } => match render_image(image) {
-                Ok(image) => _ = self.photos.insert(file_id, image),
-                Err(error) => self.show_error(&format!("{error:#}")),
-            },
+            Event::PhotoProgress { file_id, progress } => _ = self.photo_progress.insert(file_id, progress),
+            Event::Photo { file_id, image } => {
+                self.photo_progress.remove(&file_id);
+                match render_image(image) {
+                    Ok(image) => _ = self.photos.insert(file_id, image),
+                    Err(error) => self.show_error(&format!("{error:#}")),
+                }
+            }
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
             | Event::OlderHistory { .. }
@@ -314,13 +333,34 @@ impl Plaingram {
         self.error = Some(sanitize(message));
     }
 
-    fn request_photos(&mut self, messages: &[SafeMessage]) {
-        for message in messages {
+    /// Requests the photos on screen, and those the scroll velocity brings on screen within [`PHOTO_LOOKAHEAD`].
+    fn load_photos_in_view(&mut self, cx: &mut Context<Self>) {
+        let Some((first, last)) = self.visible_rows.get() else { return };
+        let now = Instant::now();
+        self.scroll_samples.retain(|&(time, _)| now - time < VELOCITY_WINDOW);
+        self.scroll_samples.push_back((now, first));
+        let (since, from) = self.scroll_samples[0];
+        let rows_per_second = match (now - since).as_secs_f32() {
+            0. => 0.,
+            seconds => (first as f32 - from as f32) / seconds,
+        };
+        let ahead = ((rows_per_second.abs() * PHOTO_LOOKAHEAD.as_secs_f32()).ceil() as usize).min(PHOTO_LOOKAHEAD_ROWS);
+        let rows = match rows_per_second < 0. {
+            true => first.saturating_sub(ahead)..last + 1,
+            false => first..last + 1 + ahead,
+        };
+        let rows = rows.start.min(self.messages.len())..rows.end.min(self.messages.len());
+        let mut requested = false;
+        for message in &self.messages[rows] {
             if let SafeContent::Photo { photo, .. } = &message.content
                 && self.requested_photos.insert(photo.file_id)
             {
                 self.client.load_photo(photo.file_id);
+                requested = true;
             }
+        }
+        if requested {
+            cx.notify();
         }
     }
 
@@ -453,8 +493,24 @@ impl Plaingram {
                 ))
             })
             .child(
-                MessageScroller::new("messages", self.scroller.clone(), move |ix, _, cx| {
-                    app.read(cx).render_message(ix, cx)
+                MessageScroller::new("messages", self.scroller.clone(), {
+                    let visible_rows = self.visible_rows.clone();
+                    move |ix, _, cx| {
+                        let visible_rows = visible_rows.clone();
+                        let on_screen = canvas(
+                            move |bounds, window, _| {
+                                if window.content_mask().bounds.intersects(&bounds) {
+                                    let (first, last) = visible_rows.get().unwrap_or((ix, ix));
+                                    visible_rows.set(Some((first.min(ix), last.max(ix))));
+                                }
+                            },
+                            |_, _, _, _| {},
+                        );
+                        div()
+                            .relative()
+                            .child(app.read(cx).render_message(ix, cx))
+                            .child(on_screen.absolute().size_full())
+                    }
                 })
                 .flex_1(),
             )
@@ -557,13 +613,41 @@ impl Plaingram {
         let (width, height) = (px(photo.width as f32 * scale), px(photo.height as f32 * scale));
         match self.photos.get(&photo.file_id) {
             Some(image) => img(ImageSource::Render(image.clone())).w(width).h(height).into_any_element(),
-            None => div().w(width).h(height).bg(cx.theme().muted).into_any_element(),
+            None => div()
+                .relative()
+                .w(width)
+                .h(height)
+                .bg(cx.theme().muted)
+                .when(self.requested_photos.contains(&photo.file_id), |el| {
+                    let progress = self.photo_progress.get(&photo.file_id).copied().unwrap_or_default();
+                    el.child(
+                        h_flex()
+                            .absolute()
+                            .bottom_2()
+                            .left_2()
+                            .right_2()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(4.))
+                                    .bg(cx.theme().background)
+                                    .child(div().h_full().w(relative(progress)).bg(cx.theme().foreground)),
+                            )
+                            .child(format!("{:.0}%", progress * 100.)),
+                    )
+                })
+                .into_any_element(),
         }
     }
 }
 
 impl Render for Plaingram {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.visible_rows.set(None);
+        cx.defer_in(window, |this, _, cx| this.load_photos_in_view(cx));
         let now = Instant::now();
         self.frames.push_back(now);
         while self.frames.front().is_some_and(|&frame| now - frame > Duration::from_secs(1)) {
