@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
@@ -9,6 +11,7 @@ use crate::text::{is_allowed, sanitize, sanitize_name};
 const ME: i64 = 1;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
+const DEMO_SPACING: i32 = 5 * 3600;
 const TOPICS: [(i32, &str); 3] = [(1, "General"), (2, "Announcements \u{1F4E2}"), (3, "Help")];
 const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
 
@@ -111,7 +114,7 @@ impl Backend for Demo {
 
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String) {
         if is_allowed(&text) {
-            self.emit(Event::Message(message(chat_id, topic, 1000, ME, SafeContent::Text(sanitize(&text)))))
+            self.emit(Event::Message(message(chat_id, topic, 1000, ME, SafeContent::Text(sanitize(&text)), now())))
         } else {
             self.emit(Event::Error(sanitize("message contains characters outside the allowlist")))
         }
@@ -147,9 +150,21 @@ fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
         FORUM => vec![(2, text("Welcome! Ask questions in Help.")), (4, text("Thanks \u{1F91D}"))],
         _ => vec![(ME, text("Hey!")), (2, text("Hi \u{1F60A}"))],
     };
-    entries.into_iter().zip(1..).map(|((from, content), id)| message(chat_id, topic, id, from, content)).collect()
+    let (now, count) = (now(), entries.len() as i32);
+    entries
+        .into_iter()
+        .zip(1..)
+        .map(|((from, content), id)| {
+            message(chat_id, topic, id.into(), from, content, now - 120 - (count - id) * DEMO_SPACING)
+        })
+        .collect()
 }
 
-fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeContent) -> SafeMessage {
-    SafeMessage { id, chat_id, sender: Sender::User(from), date: 0, outgoing: from == ME, topic, content }
+fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeContent, date: i32) -> SafeMessage {
+    SafeMessage { id, chat_id, sender: Sender::User(from), date, outgoing: from == ME, topic, content }
+}
+
+fn now() -> i32 {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock is after 1970").as_secs();
+    i32::try_from(secs).expect("clock is before 2038")
 }

@@ -2,8 +2,10 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, Local};
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -53,7 +55,7 @@ pub struct Plaingram {
     requested_photos: HashSet<i32>,
     error: Option<SafeText>,
     _subscriptions: [Subscription; 3],
-    _events: Task<()>,
+    _tasks: [Task<()>; 2],
 }
 
 impl Plaingram {
@@ -84,6 +86,14 @@ impl Plaingram {
                 }
             }
         });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        });
         Self {
             client,
             auth: None,
@@ -106,7 +116,7 @@ impl Plaingram {
             requested_photos: HashSet::new(),
             error: None,
             _subscriptions: subscriptions,
-            _events: events,
+            _tasks: [events, clock],
         }
     }
 
@@ -485,16 +495,18 @@ impl Plaingram {
     }
 
     fn render_sender(&self, message: &SafeMessage, cx: &App) -> Div {
+        let time = timestamp(message.date, Local::now());
         let row = h_flex().gap_2().text_xs();
+        let muted = |text: String| div().text_color(cx.theme().muted_foreground).child(text);
         if message.outgoing {
-            return row.child("You");
+            return row.child("You").child(muted(time));
         }
         let note = match message.sender {
             Sender::User(id) => self.person_note(id),
             Sender::Chat(id) => format!("chat {id}"),
         };
         row.children(self.sender_name(message.sender).map(|name| name_label(name, cx)))
-            .child(div().text_color(cx.theme().muted_foreground).child(note))
+            .child(muted(format!("{note} · {time}")))
     }
 
     fn render_photo(&self, photo: &PhotoRef, cx: &App) -> AnyElement {
@@ -562,4 +574,40 @@ fn tab_bar(
     on_click: impl Fn(&usize, &mut Window, &mut App) + 'static,
 ) -> TabBar {
     TabBar::new(id).underline().px_2().menu(true).selected_index(selected).on_click(on_click).children(labels)
+}
+
+/// Relative for the last 24 hours, then the local date and time.
+fn timestamp(date: i32, now: DateTime<Local>) -> String {
+    let age = now.timestamp() - i64::from(date);
+    match age {
+        ..60 => "just now".into(),
+        60..3600 => format!("{}m ago", age / 60),
+        3600..86400 => format!("{}h ago", age / 3600),
+        _ => DateTime::from_timestamp(date.into(), 0)
+            .expect("every i32 timestamp is in range")
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, TimeZone as _};
+
+    use super::timestamp;
+
+    #[test]
+    fn timestamps_are_relative_for_a_day_then_absolute() {
+        const NOW: i32 = 1_800_000_000;
+        let ago = |secs: i32| timestamp(NOW - secs, Local.timestamp_opt(NOW.into(), 0).unwrap());
+        assert_eq!(ago(-5), "just now");
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ago(60), "1m ago");
+        assert_eq!(ago(3599), "59m ago");
+        assert_eq!(ago(3600), "1h ago");
+        assert_eq!(ago(86399), "23h ago");
+        let absolute = ago(86400);
+        assert!(absolute.starts_with("2027-01-1") && absolute.len() == 16, "{absolute}");
+    }
 }
