@@ -13,8 +13,9 @@ use td::enums::{
 use td::{functions, types};
 use tokio::runtime::Runtime;
 
-use crate::image::decode_jpeg;
+use crate::image::{decode_jpeg, encode_jpeg};
 use crate::model::{AuthStep, Backend, Event};
+use crate::paths;
 use crate::policy;
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
@@ -87,7 +88,7 @@ pub struct Client {
 impl Client {
     pub fn start() -> Result<(Self, Events)> {
         td::set_log_verbosity(1).map_err(td_error)?;
-        let data_dir = crate::paths::data_dir()?;
+        let data_dir = paths::data_dir()?;
         let (events, receiver) = async_channel::unbounded();
         let client = Self { id: td::create_client(), data_dir, events, allowed: Arc::default() };
         let worker = client.clone();
@@ -209,11 +210,27 @@ impl Backend for Client {
     fn load_photo(&self, file_id: i32) {
         let this = self.clone();
         self.spawn(async move {
-            let File::File(file) = functions::download_file(file_id, 1, 0, 0, true, this.id).await.map_err(td_error)?;
-            ensure!(file.local.is_downloading_completed, "photo {file_id} did not finish downloading");
-            let image = tokio::task::spawn_blocking(move || decode_jpeg(&std::fs::read(&file.local.path)?)).await??;
+            let path = this.download(file_id).await?;
+            let image = tokio::task::spawn_blocking(move || decode_jpeg(&std::fs::read(path)?)).await??;
             this.emit(Event::Photo { file_id, image });
             Ok(())
+        });
+    }
+
+    fn save_photo(&self, file_id: i32, name: String) {
+        self.save(file_id, move |source| {
+            let jpeg = encode_jpeg(&decode_jpeg(&std::fs::read(source)?)?)?;
+            paths::save_download(&name, &mut jpeg.as_slice())
+        });
+    }
+
+    fn save_file(&self, file_id: i32, name: String) {
+        self.save(file_id, move |source| {
+            let name = match name.is_empty() {
+                true => source.file_name().context("downloaded file has no name")?.to_string_lossy().into_owned(),
+                false => name,
+            };
+            paths::save_download(&name, &mut std::fs::File::open(&source)?)
         });
     }
 
@@ -362,7 +379,7 @@ impl Client {
                 self.emit(Event::MessageSent { old_id: u.old_message_id, message: policy::message(&u.message) });
             }
             Update::File(u) if u.file.local.is_downloading_active => {
-                self.emit(Event::PhotoProgress { file_id: u.file.id, progress: policy::download_progress(&u.file) });
+                self.emit(Event::DownloadProgress { file_id: u.file.id, progress: policy::download_progress(&u.file) });
             }
             Update::MessageSendFailed(u) => bail!("sending failed: {}", u.error.message),
             _ => {}
@@ -416,6 +433,24 @@ impl Client {
         )
         .await
         .map_err(td_error)
+    }
+
+    /// Downloads a file completely and returns where TDLib keeps it.
+    async fn download(&self, file_id: i32) -> Result<PathBuf> {
+        let File::File(file) = functions::download_file(file_id, 1, 0, 0, true, self.id).await.map_err(td_error)?;
+        ensure!(file.local.is_downloading_completed, "file {file_id} did not finish downloading");
+        Ok(file.local.path.into())
+    }
+
+    /// Downloads a file, writes it out with `save` off the async runtime, and reports where it went.
+    fn save(&self, file_id: i32, save: impl FnOnce(PathBuf) -> Result<PathBuf> + Send + 'static) {
+        let this = self.clone();
+        self.spawn(async move {
+            let source = this.download(file_id).await?;
+            let path = tokio::task::spawn_blocking(move || save(source)).await??;
+            this.emit(Event::Saved { file_id, path: sanitize(&path.display().to_string()) });
+            Ok(())
+        });
     }
 
     fn spawn(&self, task: impl Future<Output = Result<()>> + Send + 'static) {

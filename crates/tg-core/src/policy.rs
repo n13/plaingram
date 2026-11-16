@@ -5,10 +5,10 @@ use td::enums::{ChatList, ChatType, MessageContent, MessageOrigin, MessageSender
 use td::types;
 
 use crate::model::{
-    ChatKind, ChatListId, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile,
-    SafeReply, SafeTopic, SafeUser, Sender,
+    ChatKind, ChatListId, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFile, SafeFolder, SafeMessage,
+    SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
 };
-use crate::text::{sanitize, sanitize_name};
+use crate::text::{SafeText, sanitize, sanitize_name};
 
 const MAX_PHOTO_SIDE: i32 = 1280;
 
@@ -87,8 +87,12 @@ pub(crate) fn account_info(info: &types::AccountInfo) -> SafeAccountInfo {
 }
 
 pub(crate) fn download_progress(file: &types::File) -> f32 {
-    let size = if file.size > 0 { file.size } else { file.expected_size };
-    (file.local.downloaded_size as f32 / size.max(1) as f32).clamp(0., 1.)
+    (file.local.downloaded_size as f32 / file_size(file).max(1) as f32).clamp(0., 1.)
+}
+
+/// The exact size when known, else TDLib's estimate.
+fn file_size(file: &types::File) -> i64 {
+    if file.size > 0 { file.size } else { file.expected_size }
 }
 
 fn full_name(user: &types::User) -> String {
@@ -162,6 +166,12 @@ fn content(content: &MessageContent) -> SafeContent {
             service("upgraded the group".into())
         }
         MessageContent::MessagePinMessage(_) => service("pinned a message".into()),
+        MessageContent::MessageDocument(d) => file(content, &d.document.file_name, &d.document.document),
+        MessageContent::MessageVideo(v) => file(content, &v.video.file_name, &v.video.video),
+        MessageContent::MessageAudio(a) => file(content, &a.audio.file_name, &a.audio.audio),
+        MessageContent::MessageAnimation(a) => file(content, &a.animation.file_name, &a.animation.animation),
+        MessageContent::MessageVoiceNote(v) => file(content, "", &v.voice_note.voice),
+        MessageContent::MessageVideoNote(v) => file(content, "", &v.video_note.video),
         _ => hidden(content),
     }
 }
@@ -176,7 +186,19 @@ fn photo(sizes: &[types::PhotoSize]) -> Option<PhotoRef> {
 }
 
 fn hidden(content: &MessageContent) -> SafeContent {
-    SafeContent::Hidden(sanitize(variant_name(content).trim_start_matches("Message")))
+    SafeContent::Hidden(kind(content))
+}
+
+fn file(content: &MessageContent, name: &str, file: &types::File) -> SafeContent {
+    SafeContent::File {
+        kind: kind(content),
+        file: SafeFile { file_id: file.id, name: sanitize(name), size: file_size(file) },
+    }
+}
+
+/// "Document" for `MessageDocument`.
+fn kind(content: &MessageContent) -> SafeText {
+    sanitize(variant_name(content).trim_start_matches("Message"))
 }
 
 pub(crate) fn variant_name(value: &impl Debug) -> String {
@@ -310,5 +332,29 @@ mod tests {
         assert_eq!(info.registered, None);
         assert_eq!(info.phone_country.to_string(), "NG");
         assert_eq!((info.name_changed, info.photo_changed), (Some(1_800_000_000), None));
+    }
+
+    #[test]
+    fn documents_and_voice_messages_become_files_that_can_be_saved() {
+        let file = |id| types::File { id, size: 2048, ..Default::default() };
+        let document = MessageContent::MessageDocument(types::MessageDocument {
+            document: types::Document {
+                file_name: "notes\u{202E}piz.exe".into(),
+                mime_type: String::new(),
+                minithumbnail: None,
+                thumbnail: None,
+                document: file(7),
+            },
+            caption: types::FormattedText::default(),
+        });
+        let SafeContent::File { kind, file: saved } = content(&document) else { panic!("{document:?}") };
+        assert_eq!((kind.to_string(), saved.file_id, saved.size), ("Document".into(), 7, 2048));
+        assert_eq!(saved.name.to_string(), "notes?piz.exe", "a right-to-left override cannot disguise the extension");
+        let voice = MessageContent::MessageVoiceNote(types::MessageVoiceNote {
+            voice_note: types::VoiceNote { voice: file(8), ..Default::default() },
+            ..Default::default()
+        });
+        let SafeContent::File { kind, file: saved } = content(&voice) else { panic!("{voice:?}") };
+        assert_eq!((kind.to_string(), saved.file_id, saved.name.is_empty()), ("VoiceNote".into(), 8, true));
     }
 }

@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Entity, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput,
-    WindowHandle, point, px, size,
+    AppContext as _, Entity, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
 };
-use tg_core::Demo;
+use tg_core::{Demo, SafeContent};
 
-use crate::app::Plaingram;
+use crate::app::{Plaingram, Viewer};
 
 const SCREENSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/screenshots");
 const GROUP_CHAT: i64 = 11;
@@ -128,7 +128,7 @@ fn photos_load_only_on_or_approaching_the_screen() {
         ids
     };
     assert_eq!(requested(&mut cx), [1000], "only the photo on screen loads");
-    assert_eq!(cx.update(|cx| app.read(cx).photo_progress.get(&1000).copied()), Some(0.42));
+    assert_eq!(cx.update(|cx| app.read(cx).download_progress.get(&1000).copied()), Some(0.42));
 
     scroll_to(&mut cx, &app, 10);
     draw(&mut cx, window);
@@ -204,12 +204,85 @@ fn profile_fits_beside_a_forum_with_many_topics() {
 }
 
 fn click(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, x: f32, y: f32) {
-    let (button, position, modifiers, click_count) = (MouseButton::Left, point(px(x), px(y)), Modifiers::default(), 1);
+    press(cx, window, MouseButton::Left, x, y);
+    cx.run_until_parked();
+}
+
+/// Presses and releases `button` without letting the app process the events that follow.
+fn press(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, button: MouseButton, x: f32, y: f32) {
+    let (position, modifiers, click_count) = (point(px(x), px(y)), Modifiers::default(), 1);
     cx.update_window(window.into(), |_, window, cx| {
         let down = MouseDownEvent { button, position, modifiers, click_count, first_mouse: false };
         window.dispatch_event(PlatformInput::MouseDown(down), cx);
         window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count }), cx);
     })
     .unwrap();
+}
+
+/// The demo group chat's photo opens with Download; the impostor's profile photo opens without it.
+#[test]
+fn photos_open_full_window_and_escape_closes_them() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    cx.update(|cx| app.update(cx, |app, cx| app.toggle_profile(IMPOSTOR, cx)));
     cx.run_until_parked();
+    let photos = cx.update(|cx| {
+        let app = app.read(cx);
+        let chat = app.messages.iter().find_map(|m| match m.content {
+            SafeContent::Photo { photo, .. } => Some(photo),
+            _ => None,
+        });
+        [chat, app.profiles.get(&IMPOSTOR).and_then(|p| p.photo)]
+    });
+    for (name, photo, save_as) in
+        [("viewer", photos[0].unwrap(), Some("photo.jpg".to_owned())), ("viewer-profile", photos[1].unwrap(), None)]
+    {
+        let viewer = Viewer { photo, save_as };
+        cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.open_viewer(viewer, window, cx)))
+            .unwrap();
+        draw(&mut cx, window);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/{name}.png")).unwrap();
+        let escape = KeyDownEvent {
+            keystroke: Keystroke::parse("escape").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        cx.update_window(window.into(), |_, window, cx| _ = window.dispatch_event(PlatformInput::KeyDown(escape), cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| app.read(cx).viewer.is_none()), "Escape closes the {name}");
+    }
+}
+
+/// The demo document (file 3000) is at the top of the group chat; its menu opens under the pointer.
+#[test]
+fn right_clicking_a_file_offers_to_download_it() {
+    const DOCUMENT: i32 = 3000;
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    press(&mut cx, window, MouseButton::Right, 495., 93.);
+    cx.run_until_parked();
+    draw(&mut cx, window);
+    press(&mut cx, window, MouseButton::Left, 535., 108.);
+    let progress = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).download_progress.get(&DOCUMENT).copied());
+    assert_eq!(progress(&mut cx), Some(0.), "Download starts saving the file");
+    cx.run_until_parked();
+    assert_eq!(progress(&mut cx), None, "the demo reports the save");
+
+    let photo = cx.update(|cx| {
+        app.read(cx).messages.iter().find_map(|m| match m.content {
+            SafeContent::Photo { photo, .. } => Some(photo),
+            _ => None,
+        })
+    });
+    let viewer = Viewer { photo: photo.unwrap(), save_as: Some("photo.jpg".into()) };
+    cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.open_viewer(viewer, window, cx)))
+        .unwrap();
+    draw(&mut cx, window);
+    click(&mut cx, window, 990., 54.);
+    draw(&mut cx, window);
+    cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/saved.png")).unwrap();
 }

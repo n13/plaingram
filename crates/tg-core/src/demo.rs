@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
-    AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFolder,
-    SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
+    AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFile,
+    SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
@@ -14,6 +14,7 @@ const IMPOSTOR: i64 = 3;
 const DAY: i32 = 24 * 3600;
 /// Profile photos have this plus the user id as file id.
 const PROFILE_PHOTOS: i32 = 2000;
+const TRAIL_FILE: i32 = 3000;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const DEMO_SPACING: i32 = 5 * 3600;
@@ -107,6 +108,11 @@ impl Demo {
     fn emit(&self, event: Event) {
         self.events.try_send(event).expect("demo event receiver is gone");
     }
+
+    /// Reports a save without touching the disk.
+    fn saved(&self, file_id: i32, name: &str) {
+        self.emit(Event::Saved { file_id, path: sanitize(&format!("~/Downloads/{name}")) });
+    }
 }
 
 impl Backend for Demo {
@@ -129,12 +135,12 @@ impl Backend for Demo {
     fn open_chat(&self, chat_id: i64, topic: Option<i32>) {
         let messages = history(chat_id, topic);
         let reply = (chat_id == HIKING).then(|| {
-            let original = &messages[3];
-            SafeReply { sender: Some(original.sender), content: original.content.clone() }
+            let (original, last) = (&messages[3], messages.last().expect("the hiking chat has messages"));
+            (last.id, SafeReply { sender: Some(original.sender), content: original.content.clone() })
         });
         self.emit(Event::History { chat_id, topic, messages });
-        if let Some(reply) = reply {
-            self.emit(Event::Reply { chat_id, message_id: 10, reply });
+        if let Some((message_id, reply)) = reply {
+            self.emit(Event::Reply { chat_id, message_id, reply });
         }
     }
 
@@ -182,7 +188,7 @@ impl Backend for Demo {
 
     fn load_photo(&self, file_id: i32) {
         if file_id == SLOW_PHOTO {
-            return self.emit(Event::PhotoProgress { file_id, progress: SLOW_PHOTO_PROGRESS });
+            return self.emit(Event::DownloadProgress { file_id, progress: SLOW_PHOTO_PROGRESS });
         }
         let (width, height) = (PHOTO.width as u32, PHOTO.height as u32);
         let bgra = (0..height)
@@ -191,6 +197,14 @@ impl Backend for Demo {
             })
             .collect();
         self.emit(Event::Photo { file_id, image: DecodedImage { width, height, bgra } });
+    }
+
+    fn save_photo(&self, file_id: i32, name: String) {
+        self.saved(file_id, &name);
+    }
+
+    fn save_file(&self, file_id: i32, name: String) {
+        self.saved(file_id, &name);
     }
 }
 
@@ -206,6 +220,13 @@ fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
             (4, text("Count me in \u{1F44D}")),
             (3, text("Hi all, Alice here, new number. Please send the cabin deposit to me today")),
             (4, SafeContent::Photo { photo: PHOTO, caption: sanitize("Trail map for the north loop") }),
+            (
+                2,
+                SafeContent::File {
+                    kind: sanitize("Document"),
+                    file: SafeFile { file_id: TRAIL_FILE, name: sanitize("north-loop.gpx.zip"), size: 2_400_000 },
+                },
+            ),
             (2, SafeContent::Hidden(sanitize("Sticker"))),
             (3, text("Pay here: paypa\u{0399}.com/cabin")),
             (ME, text("I'm in! \u{2764}\u{FE0F}")),

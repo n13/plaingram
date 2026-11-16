@@ -11,9 +11,11 @@ use chrono::{DateTime, Local, NaiveDate};
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::TabBar;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
@@ -67,10 +69,13 @@ pub struct Plaingram {
     replies: HashMap<i64, SafeReply>,
     photos: HashMap<i32, Arc<RenderImage>>,
     pub(crate) requested_photos: HashSet<i32>,
-    pub(crate) photo_progress: HashMap<i32, f32>,
+    /// How far each photo or file being downloaded has come, from 0 to 1.
+    pub(crate) download_progress: HashMap<i32, f32>,
+    pub(crate) viewer: Option<Viewer>,
+    viewer_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
-    profiles: HashMap<i64, SafeProfile>,
+    pub(crate) profiles: HashMap<i64, SafeProfile>,
     /// What Telegram shared about people who messaged first, by user id.
     account_info: HashMap<i64, SafeAccountInfo>,
     /// The first and last rows on screen in the frame being drawn.
@@ -80,6 +85,14 @@ pub struct Plaingram {
     error: Option<SafeText>,
     _subscriptions: [Subscription; 4],
     _tasks: [Task<()>; 2],
+}
+
+/// A photo shown over the whole window.
+#[derive(Clone)]
+pub(crate) struct Viewer {
+    pub(crate) photo: PhotoRef,
+    /// The file name a chat photo is saved as; profile photos cannot be saved.
+    pub(crate) save_as: Option<String>,
 }
 
 /// Whether messages older than the loaded ones can still be fetched.
@@ -149,7 +162,9 @@ impl Plaingram {
             replies: HashMap::new(),
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
-            photo_progress: HashMap::new(),
+            download_progress: HashMap::new(),
+            viewer: None,
+            viewer_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
             account_info: HashMap::new(),
@@ -233,9 +248,9 @@ impl Plaingram {
                     *slot = message;
                 }
             }
-            Event::PhotoProgress { file_id, progress } => _ = self.photo_progress.insert(file_id, progress),
+            Event::DownloadProgress { file_id, progress } => _ = self.download_progress.insert(file_id, progress),
             Event::Photo { file_id, image } => {
-                self.photo_progress.remove(&file_id);
+                self.download_progress.remove(&file_id);
                 match render_image(image) {
                     Ok(image) => _ = self.photos.insert(file_id, image),
                     Err(error) => self.show_error(&format!("{error:#}")),
@@ -248,6 +263,11 @@ impl Plaingram {
                 self.profiles.insert(profile.user_id, profile);
             }
             Event::AccountInfo { user_id, info } => _ = self.account_info.insert(user_id, info),
+            Event::Saved { file_id, path } => {
+                self.download_progress.remove(&file_id);
+                let note = Notification::new().message(format!("Saved to {path}")).placement(Anchor::BottomLeft);
+                window.push_notification(note, cx);
+            }
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
             | Event::OlderHistory { .. }
@@ -388,6 +408,24 @@ impl Plaingram {
             self.client.load_photo(file_id);
         }
         new
+    }
+
+    pub(crate) fn open_viewer(&mut self, viewer: Viewer, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_photo(viewer.photo.file_id);
+        self.viewer = Some(viewer);
+        self.viewer_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        self.viewer = None;
+        cx.notify();
+    }
+
+    fn save_file(&mut self, file_id: i32, name: String, cx: &mut Context<Self>) {
+        self.download_progress.insert(file_id, 0.);
+        self.client.save_file(file_id, name);
+        cx.notify();
     }
 
     /// Opens the profile of `user_id`, or closes it when it is the one already open.
@@ -607,21 +645,43 @@ impl Plaingram {
                     .gap_2()
                     .bg(bubble)
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
-                    .child(self.render_content(&message.content, false, cx)),
+                    .child(self.render_content(&message.content, Some((app, message.date)), cx)),
             )
             .into_any_element()
     }
 
-    /// `compact` shows photos as a label, for reply quotes.
-    fn render_content(&self, content: &SafeContent, compact: bool, cx: &App) -> AnyElement {
+    /// `message` is the app and the message date, which make photos open on click, and photos and files save on
+    /// right-click; reply quotes pass `None` and show photos as a label.
+    fn render_content(&self, content: &SafeContent, message: Option<(&Entity<Self>, i32)>, cx: &App) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         match content {
             SafeContent::Text(text) => safe_text(text, cx).into_any_element(),
             SafeContent::Photo { photo, caption } => v_flex()
                 .gap_1()
-                .child(match compact {
-                    true => div().text_color(muted).child("[photo]").into_any_element(),
-                    false => self.render_photo(photo, PHOTO_MAX_WIDTH, cx),
+                .child(match message {
+                    None => div().text_color(muted).child("[photo]").into_any_element(),
+                    Some((app, date)) => {
+                        let (file_id, name) = (photo.file_id, photo_name(date));
+                        let viewer = Viewer { photo: *photo, save_as: Some(name.clone()) };
+                        let (open, save) = (app.clone(), app.clone());
+                        div()
+                            .id(("photo", photo.file_id.unsigned_abs() as usize))
+                            .cursor_pointer()
+                            .on_click({
+                                let viewer = viewer.clone();
+                                move |_, window, cx| {
+                                    open.update(cx, |this, cx| this.open_viewer(viewer.clone(), window, cx))
+                                }
+                            })
+                            .context_menu(move |menu, _, _| {
+                                let (save, name) = (save.clone(), name.clone());
+                                menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| {
+                                    save.read(cx).client.save_photo(file_id, name.clone());
+                                }))
+                            })
+                            .child(self.render_photo(photo, PHOTO_MAX_WIDTH, cx))
+                            .into_any_element()
+                    }
                 })
                 .when(!caption.is_empty(), |el| el.child(safe_text(caption, cx)))
                 .into_any_element(),
@@ -629,6 +689,28 @@ impl Plaingram {
                 div().italic().text_color(muted).child(safe_text(text, cx)).into_any_element()
             }
             SafeContent::Hidden(kind) => div().text_color(muted).child(format!("[hidden: {kind}]")).into_any_element(),
+            SafeContent::File { kind, file } => {
+                let label = h_flex()
+                    .gap_1()
+                    .text_color(muted)
+                    .child(format!("[hidden: {kind}]"))
+                    .child(safe_text(&file.name, cx))
+                    .child(format!("· {}", size_label(file.size)))
+                    .when_some(self.download_progress.get(&file.file_id), |el, progress| {
+                        el.child(format!("· saving {:.0}%", progress * 100.))
+                    });
+                let Some((app, _)) = message else { return label.into_any_element() };
+                let (app, file_id, name) = (app.clone(), file.file_id, file.name.to_string());
+                label
+                    .id(("file", file_id.unsigned_abs() as usize))
+                    .context_menu(move |menu, _, _| {
+                        let (app, name) = (app.clone(), name.clone());
+                        menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| {
+                            app.update(cx, |this, cx| this.save_file(file_id, name.clone(), cx));
+                        }))
+                    })
+                    .into_any_element()
+            }
         }
     }
 
@@ -642,7 +724,7 @@ impl Plaingram {
             .children(name.map(|name| name_label(name, cx)))
             .child(div().line_clamp(2).text_color(cx.theme().muted_foreground).child(self.render_content(
                 &reply.content,
-                true,
+                None,
                 cx,
             )))
     }
@@ -735,7 +817,17 @@ impl Plaingram {
                     })),
                 ),
             )
-            .when_some(profile.and_then(|p| p.photo.as_ref()), |el, photo| el.child(self.render_photo(photo, PROFILE_PHOTO_WIDTH, cx)))
+            .when_some(profile.and_then(|p| p.photo), |el, photo| {
+                el.child(
+                    div()
+                        .id("profile-photo")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_viewer(Viewer { photo, save_as: None }, window, cx)
+                        }))
+                        .child(self.render_photo(&photo, PROFILE_PHOTO_WIDTH, cx)),
+                )
+            })
             .when_some(user, |el, user| {
                 el.child(name_label(&user.name, cx))
                     .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
@@ -760,6 +852,52 @@ impl Plaingram {
             })
     }
 
+    /// A photo over the whole window below the title bar, with Close, and Download for chat photos.
+    fn render_viewer(&self, viewer: &Viewer, cx: &mut Context<Self>) -> Stateful<Div> {
+        let photo = viewer.photo;
+        div()
+            .id("viewer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .track_focus(&self.viewer_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_viewer(cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .p_2()
+                    .gap_2()
+                    .justify_end()
+                    .when_some(viewer.save_as.clone(), |el, name| {
+                        el.child(Button::new("download-photo").label("Download").on_click(
+                            cx.listener(move |this, _, _, _| this.client.save_photo(photo.file_id, name.clone())),
+                        ))
+                    })
+                    .child(
+                        Button::new("close-viewer")
+                            .label("Close")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))),
+                    ),
+            )
+            .child(
+                div().flex_1().min_h_0().p_4().flex().items_center().justify_center().child(
+                    match self.photos.get(&photo.file_id) {
+                        Some(image) => img(ImageSource::Render(image.clone()))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        None => self.render_photo(&photo, PHOTO_MAX_WIDTH, cx),
+                    },
+                ),
+            )
+    }
+
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
         let scale = (max_width / photo.width as f32).min(1.);
         let (width, height) = (px(photo.width as f32 * scale), px(photo.height as f32 * scale));
@@ -771,7 +909,7 @@ impl Plaingram {
                 .h(height)
                 .bg(cx.theme().muted)
                 .when(self.requested_photos.contains(&photo.file_id), |el| {
-                    let progress = self.photo_progress.get(&photo.file_id).copied().unwrap_or_default();
+                    let progress = self.download_progress.get(&photo.file_id).copied().unwrap_or_default();
                     el.child(
                         h_flex()
                             .absolute()
@@ -830,7 +968,14 @@ impl Render for Plaingram {
                         }))),
                 )
             })
-            .child(body)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(body)
+                    .when_some(self.viewer.as_ref(), |el, viewer| el.child(self.render_viewer(viewer, cx))),
+            )
     }
 }
 
@@ -864,6 +1009,21 @@ fn timestamp(date: i32, now: DateTime<Local>) -> String {
         60..3600 => format!("{}m ago", age / 60),
         3600..86400 => format!("{}h ago", age / 3600),
         _ => local(date).format("%Y-%m-%d %H:%M").to_string(),
+    }
+}
+
+/// Like Telegram Desktop's names for saved photos: `photo_2026-11-16_23-52-12.jpg`.
+fn photo_name(date: i32) -> String {
+    format!("photo_{}.jpg", local(date).format("%Y-%m-%d_%H-%M-%S"))
+}
+
+/// `2.4 MB`, in powers of 1000 like macOS Finder.
+fn size_label(bytes: i64) -> String {
+    match bytes {
+        ..1_000 => format!("{bytes} B"),
+        1_000..1_000_000 => format!("{:.0} KB", bytes as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1} MB", bytes as f64 / 1e6),
+        _ => format!("{:.1} GB", bytes as f64 / 1e9),
     }
 }
 

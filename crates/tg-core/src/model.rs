@@ -100,9 +100,25 @@ pub struct PhotoRef {
 }
 
 #[derive(Clone, Debug)]
+pub struct SafeFile {
+    pub file_id: i32,
+    /// The name the sender gave it; empty for voice and video messages.
+    pub name: SafeText,
+    pub size: i64,
+}
+
+#[derive(Clone, Debug)]
 pub enum SafeContent {
     Text(SafeText),
-    Photo { photo: PhotoRef, caption: SafeText },
+    Photo {
+        photo: PhotoRef,
+        caption: SafeText,
+    },
+    /// A document, video or voice message: never shown or opened, but its file can be saved.
+    File {
+        kind: SafeText,
+        file: SafeFile,
+    },
     Service(SafeText),
     Hidden(SafeText),
 }
@@ -178,14 +194,19 @@ pub enum Event {
         old_id: i64,
         message: SafeMessage,
     },
-    /// How much of a requested photo has downloaded, from 0 to 1.
-    PhotoProgress {
+    /// How much of a requested photo or file has downloaded, from 0 to 1.
+    DownloadProgress {
         file_id: i32,
         progress: f32,
     },
     Photo {
         file_id: i32,
         image: DecodedImage,
+    },
+    /// A photo or file was saved to `path`.
+    Saved {
+        file_id: i32,
+        path: SafeText,
     },
     Profile(SafeProfile),
     AccountInfo {
@@ -209,6 +230,10 @@ pub trait Backend {
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     fn load_photo(&self, file_id: i32);
+    /// Saves a photo to ~/Downloads as `name`, re-encoded so no byte from its sender reaches the disk.
+    fn save_photo(&self, file_id: i32, name: String);
+    /// Saves a file to ~/Downloads as `name`, or as TDLib named it when `name` is empty.
+    fn save_file(&self, file_id: i32, name: String);
     /// Loads a user's full profile, as an [`Event::Profile`].
     fn load_profile(&self, user_id: i64);
 }
