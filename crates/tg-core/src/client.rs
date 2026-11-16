@@ -7,8 +7,8 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, ChatList, File, ForumTopics, InputMessageContent, Message, MessageReplyTo, MessageTopic,
-    Messages, Update,
+    AuthorizationState, Chat, ChatList, Chats, File, ForumTopics, InputMessageContent, Message, MessageReplyTo,
+    MessageTopic, Messages, Update,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
@@ -16,7 +16,7 @@ use tokio::runtime::Runtime;
 use crate::image::decode_jpeg;
 use crate::model::{AuthStep, Backend, Event};
 use crate::policy;
-use crate::text::{is_allowed, sanitize, sanitize_name};
+use crate::text::{is_allowed, report, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
 const KEYCHAIN_SERVICE: &str = "plaingram";
@@ -267,6 +267,9 @@ impl Client {
                 if user.is_bot {
                     self.allowed().bots.insert(user.id);
                 }
+                if user.name.has_replacements() {
+                    self.spawn(report_groups_in_common(self.id, u.user));
+                }
                 self.emit(Event::User(user));
             }
             Update::Supergroup(u) => {
@@ -420,6 +423,24 @@ async fn load_all_chats(id: i32, list: ChatList) -> Result<()> {
             Err(e) => return Err(td_error(e)),
         }
     }
+}
+
+/// Logs the groups shared with a user whose name was flagged, so they can be found.
+async fn report_groups_in_common(id: i32, user: types::User) -> Result<()> {
+    let groups = match functions::get_groups_in_common(user.id, 0, 100, id).await {
+        Ok(Chats::Chats(common)) => {
+            let mut titles = Vec::new();
+            for chat_id in common.chat_ids {
+                let Chat::Chat(chat) = functions::get_chat(chat_id, id).await.map_err(td_error)?;
+                titles.push(chat.title);
+            }
+            format!("in groups {titles:?}")
+        }
+        Err(e) if e.message == "Have no access to the user" => "in groups Telegram won't list".into(),
+        Err(e) => return Err(td_error(e)),
+    };
+    report(format!("flagged name: {:?} is user {} {groups}", policy::full_name(&user), user.id));
+    Ok(())
 }
 
 fn database_key() -> Result<String> {

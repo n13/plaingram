@@ -205,7 +205,7 @@ fn replace(grapheme: &str, reason: Reason) -> Segment {
     Segment::Replaced { grapheme: grapheme.into(), reason }
 }
 
-fn report(line: String) {
+pub(crate) fn report(line: String) {
     if REPORTED.lock().expect("report lock poisoned").insert(line.clone()) {
         tracing::info!("{line}");
     }

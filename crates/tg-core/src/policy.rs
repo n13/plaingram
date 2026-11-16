@@ -48,11 +48,15 @@ pub(crate) fn topic(info: &types::ForumTopicInfo) -> SafeTopic {
 pub(crate) fn user(user: &types::User) -> SafeUser {
     SafeUser {
         id: user.id,
-        name: sanitize_name(format!("{} {}", user.first_name, user.last_name).trim()),
+        name: sanitize_name(&full_name(user)),
         username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize_name(u)),
         is_contact: user.is_contact,
         is_bot: matches!(user.r#type, UserType::Bot(_)),
     }
+}
+
+pub(crate) fn full_name(user: &types::User) -> String {
+    format!("{} {}", user.first_name, user.last_name).trim().to_owned()
 }
 
 pub(crate) fn message(message: &types::Message) -> SafeMessage {
