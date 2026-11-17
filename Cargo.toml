@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/td", "crates/td-gen", "crates/tg-core", "crates/tg-ui"]
+exclude = ["vendor/zune-jpeg"]
 
 [workspace.package]
 version = "1.0.0"

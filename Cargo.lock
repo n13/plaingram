@@ -3793,7 +3793,7 @@ dependencies = [
  "rayon",
  "tiff",
  "zune-core 0.5.3",
- "zune-jpeg 0.5.15",
+ "zune-jpeg 0.5.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6216,7 +6216,7 @@ dependencies = [
  "svgtypes 0.16.2",
  "tiny-skia",
  "usvg 0.46.0",
- "zune-jpeg 0.5.15",
+ "zune-jpeg 0.5.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -7425,7 +7425,7 @@ dependencies = [
  "half",
  "quick-error 2.0.1",
  "weezl",
- "zune-jpeg 0.5.15",
+ "zune-jpeg 0.5.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -9676,6 +9676,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
 dependencies = [
  "zune-core 0.4.12",
+]
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+dependencies = [
+ "zune-core 0.5.3",
 ]
 
 [[package]]
