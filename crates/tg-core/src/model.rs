@@ -152,6 +152,8 @@ pub struct SafeReply {
 #[derive(Debug)]
 pub enum Event {
     Auth(AuthStep),
+    /// Chats opened on this computer, the most recent first.
+    RecentChats(Vec<i64>),
     /// The signed-in account.
     Account {
         user_id: i64,

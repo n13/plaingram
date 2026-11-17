@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, ChatActionBar, ChatList, ChatPhotos, File, ForumTopics, InputFile, InputMessageContent,
+    AuthorizationState, ChatActionBar, ChatList, ChatPhotos, Chats, File, ForumTopics, InputFile, InputMessageContent,
     Message, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
 };
 use td::{functions, types};
@@ -22,6 +22,8 @@ use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
 const OLDER_SIZE: usize = 100;
+/// How many recently opened chats TDLib keeps.
+const RECENT_CHATS: i32 = 50;
 const TDLIB_PAGE_LIMIT: usize = 100;
 const KEYCHAIN_SERVICE: &str = "plaingram";
 const KEYCHAIN_DB_KEY: &str = "tdlib-database-key";
@@ -456,6 +458,7 @@ impl Client {
             AuthorizationState::WaitPassword(p) => AuthStep::Password { hint: sanitize(&p.password_hint) },
             AuthorizationState::Ready => {
                 self.spawn(self.clone().emit_account());
+                self.spawn(self.clone().emit_recent_chats());
                 self.spawn(load_all_chats(self.id(), ChatList::Main));
                 self.spawn(load_all_chats(self.id(), ChatList::Archive));
                 AuthStep::Ready
@@ -510,6 +513,15 @@ impl Client {
 
     fn id(&self) -> i32 {
         self.id.load(Ordering::Relaxed)
+    }
+
+    /// TDLib remembers every chat `openChat` opened, in its database, so the order survives restarts and logging out
+    /// deletes it.
+    async fn emit_recent_chats(self) -> Result<()> {
+        let Chats::Chats(recent) =
+            functions::get_recently_opened_chats(RECENT_CHATS, self.id()).await.map_err(td_error)?;
+        self.emit(Event::RecentChats(recent.chat_ids.into_iter().filter(|&id| self.is_allowed(id)).collect()));
+        Ok(())
     }
 
     async fn emit_account(self) -> Result<()> {

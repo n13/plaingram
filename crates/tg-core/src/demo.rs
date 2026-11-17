@@ -18,6 +18,7 @@ const PROFILE_PHOTOS: i32 = 2000;
 const TRAIL_FILE: i32 = 3000;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
+const PAYPAL: i64 = 13;
 const DEMO_SPACING: i32 = 5 * 3600;
 const GENERAL_TOPIC: i32 = 1;
 /// Messages in the forum's General topic, enough to scroll back through.
@@ -99,7 +100,7 @@ impl Demo {
             (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 6, vec![main, friends]),
             (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 5, vec![main, friends, groups]),
             (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 4, vec![main, friends]),
-            (13, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 3, vec![ChatListId::Archive]),
+            (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 3, vec![ChatListId::Archive]),
             (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 2, vec![main, groups]),
             (FORUM, ChatKind::Forum, "Rust devs", 1, vec![main, groups]),
         ] {
@@ -108,6 +109,7 @@ impl Demo {
                 self.emit(Event::ChatPosition { chat_id: id, list, order });
             }
         }
+        self.emit(Event::RecentChats(vec![FORUM, PAYPAL]));
     }
 
     fn emit(&self, event: Event) {

@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local, NaiveDate};
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -46,6 +48,9 @@ const QR_STEPS: [&str; 3] =
 const QR_SIZE: f32 = 240.;
 /// Logical pixels of an attached photo's preview.
 const ATTACHMENT_SIZE: f32 = 96.;
+const SWITCHER_WIDTH: f32 = 480.;
+const SWITCHER_TOP: f32 = 60.;
+const SWITCHER_LIST_HEIGHT: f32 = 420.;
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
 const API_SETUP_STEPS: [&str; 4] = [
@@ -74,7 +79,9 @@ pub struct Plaingram {
     folders: Vec<(ChatListId, SharedString)>,
     folder_ix: usize,
     chat_list: Vec<i64>,
-    open_chat: Option<i64>,
+    /// Chats by when they were last opened, the most recent first.
+    recent: Vec<i64>,
+    pub(crate) open_chat: Option<i64>,
     /// Topics of the open chat if it is a forum.
     topics: Vec<SafeTopic>,
     topic: Option<i32>,
@@ -89,6 +96,8 @@ pub struct Plaingram {
     pub(crate) overlay: Option<Overlay>,
     /// Photos picked or dropped for the next message.
     pub(crate) attachments: Vec<PathBuf>,
+    /// The chat switcher, open over everything.
+    pub(crate) switcher: Option<Entity<CommandState>>,
     overlay_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
@@ -100,7 +109,7 @@ pub struct Plaingram {
     /// When each recent frame was drawn and its top row, for the scroll velocity.
     scroll_samples: VecDeque<(Instant, usize)>,
     error: Option<SafeText>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
     _tasks: [Task<()>; 2],
 }
 
@@ -146,11 +155,20 @@ impl Plaingram {
                 }
             }
         };
+        let app = cx.weak_entity();
         let subscriptions = [
             cx.subscribe_in(&login, window, on_enter(Self::submit_login)),
             cx.subscribe_in(&api_hash, window, on_enter(Self::submit_login)),
             cx.subscribe_in(&compose, window, on_enter(Self::send)),
             cx.observe(&scroller, |this, _, cx| this.prefetch(cx)),
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if event.keystroke.key == "k" && event.keystroke.modifiers == Modifiers::secondary_key(cx) {
+                    match app.update(cx, |app, cx| app.toggle_switcher(window, cx)) {
+                        Ok(()) => cx.stop_propagation(),
+                        Err(error) => tracing::error!("cannot toggle the chat switcher: {error:#}"),
+                    }
+                }
+            }),
         ];
         let receiver = events.clone();
         let events_task = cx.spawn_in(window, async move |this, cx| {
@@ -184,6 +202,7 @@ impl Plaingram {
             folders: folder_tabs(&[], 0),
             folder_ix: 0,
             chat_list: Vec::new(),
+            recent: Vec::new(),
             open_chat: None,
             topics: Vec::new(),
             topic: None,
@@ -195,6 +214,7 @@ impl Plaingram {
             download_progress: HashMap::new(),
             overlay: None,
             attachments: Vec::new(),
+            switcher: None,
             overlay_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
@@ -299,6 +319,13 @@ impl Plaingram {
                 let note = Notification::new().message(format!("Saved to {path}")).placement(Anchor::BottomLeft);
                 window.push_notification(note, cx);
             }
+            Event::RecentChats(chats) => {
+                for chat_id in chats {
+                    if !self.recent.contains(&chat_id) {
+                        self.recent.push(chat_id);
+                    }
+                }
+            }
             Event::Account { user_id, phone } => self.account = Some((user_id, phone)),
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
@@ -373,6 +400,8 @@ impl Plaingram {
 
     pub(crate) fn open(&mut self, chat_id: i64, cx: &mut Context<Self>) {
         self.open_chat = Some(chat_id);
+        self.recent.retain(|&id| id != chat_id);
+        self.recent.insert(0, chat_id);
         self.attachments.clear();
         self.topics.clear();
         self.clear_history(None, cx);
@@ -472,6 +501,53 @@ impl Plaingram {
         cx.notify();
     }
 
+    /// Opens the chat switcher, or closes it when it is open.
+    fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switcher.is_some() {
+            return self.close_switcher(window, cx);
+        }
+        if self.auth == Some(AuthStep::Ready) {
+            let switcher = cx.new(|cx| CommandState::new(window, cx));
+            switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
+            self.switcher = Some(switcher);
+            cx.notify();
+        }
+    }
+
+    fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher = None;
+        self.compose.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn jump_to(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = None;
+        self.open(chat_id, cx);
+        self.close_switcher(window, cx);
+    }
+
+    /// Chats whose name starts with `query`, then those that only contain it, ignoring case. Each part goes from the
+    /// most recently opened, then in Telegram's order.
+    pub(crate) fn switcher_chats(&self, query: &str) -> Vec<i64> {
+        let query = query.trim().to_lowercase();
+        let mut ranked: Vec<_> = self
+            .chats
+            .values()
+            .filter_map(|chat| {
+                let title = chat.title.to_string().to_lowercase();
+                if !title.contains(&query) {
+                    return None;
+                }
+                let recent = self.recent.iter().position(|&id| id == chat.id);
+                let order = self.positions.values().filter_map(|orders| orders.get(&chat.id)).max().copied();
+                (recent.is_some() || order.is_some())
+                    .then(|| (!title.starts_with(&query), recent.unwrap_or(usize::MAX), Reverse(order), chat.id))
+            })
+            .collect();
+        ranked.sort_unstable();
+        ranked.into_iter().map(|(.., id)| id).collect()
+    }
+
     pub(crate) fn attach(&mut self, files: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
         self.attachments.extend(files);
         cx.notify();
@@ -536,6 +612,15 @@ impl Plaingram {
         let mut chats: Vec<_> = orders.into_iter().flatten().map(|(&id, &order)| (Reverse(order), id)).collect();
         chats.sort_unstable();
         self.chat_list = chats.into_iter().map(|(_, id)| id).collect();
+    }
+
+    fn chat_note(&self, chat: &SafeChat) -> String {
+        match chat.kind {
+            ChatKind::Group => "group".to_string(),
+            ChatKind::Forum => "group with topics".to_string(),
+            ChatKind::Private { user_id } => self.person_note(user_id),
+            ChatKind::Secret { user_id } => format!("secret · {}", self.person_note(user_id)),
+        }
     }
 
     fn person_note(&self, user_id: i64) -> String {
@@ -618,12 +703,6 @@ impl Plaingram {
     fn render_chat_row(&self, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let chat = &self.chats[&self.chat_list[ix]];
         let id = chat.id;
-        let note = match chat.kind {
-            ChatKind::Group => "group".to_string(),
-            ChatKind::Forum => "group with topics".to_string(),
-            ChatKind::Private { user_id } => self.person_note(user_id),
-            ChatKind::Secret { user_id } => format!("secret · {}", self.person_note(user_id)),
-        };
         v_flex()
             .id(ix)
             .w_full()
@@ -634,8 +713,7 @@ impl Plaingram {
             .when(self.open_chat == Some(id), |el| el.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id, cx)))
-            .child(name_label(&chat.title, cx))
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(note))
+            .child(chat_label(&chat.title, self.chat_note(chat), cx))
     }
 
     fn render_conversation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1055,6 +1133,50 @@ impl Plaingram {
         )
     }
 
+    /// Type to filter; arrows and Enter or a click jump to a chat; Escape or a click outside closes.
+    fn render_switcher(&self, switcher: &Entity<CommandState>, cx: &mut Context<Self>) -> Div {
+        let chats = Rc::new(self.switcher_chats(&switcher.read(cx).query(cx)));
+        let items: Vec<_> = chats
+            .iter()
+            .map(|id| {
+                let chat = &self.chats[id];
+                let (title, note) = (chat.title.clone(), self.chat_note(chat));
+                CommandItem::new().child(move |_, cx| chat_label(&title, note.clone(), cx))
+            })
+            .collect();
+        let app = cx.entity();
+        let command = Command::new(switcher)
+            .filterable(false)
+            .placeholder("Jump to a chat")
+            .max_h(px(SWITCHER_LIST_HEIGHT))
+            .items(items)
+            .on_query({
+                let app = app.clone();
+                move |_, _, cx| app.update(cx, |_, cx| cx.notify())
+            })
+            .on_confirm(move |ix, window, cx| app.update(cx, |this, cx| this.jump_to(chats[ix.row], window, cx)));
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .justify_center()
+            .items_start()
+            .pt(px(SWITCHER_TOP))
+            .bg(cx.theme().overlay)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_switcher(window, cx)))
+            .child(
+                div()
+                    .w(px(SWITCHER_WIDTH))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
+                        this.close_switcher(window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(command),
+            )
+    }
+
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
         let scale = (max_width / photo.width as f32).min(1.);
         let (width, height) = (px(photo.width as f32 * scale), px(photo.height as f32 * scale));
@@ -1142,9 +1264,15 @@ impl Render for Plaingram {
                     .min_h_0()
                     .relative()
                     .child(body)
-                    .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx))),
+                    .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx)))
+                    .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
     }
+}
+
+/// A chat's name with its badges, over what kind of chat it is.
+fn chat_label(title: &SafeText, note: String, cx: &App) -> Div {
+    v_flex().child(name_label(title, cx)).child(div().text_xs().text_color(cx.theme().muted_foreground).child(note))
 }
 
 /// A name and @handle, each with its badges.

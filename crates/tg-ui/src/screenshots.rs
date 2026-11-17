@@ -17,6 +17,10 @@ const FORUM: i64 = 15;
 const ANNOUNCEMENTS_TOPIC: usize = 1;
 const GROUPS_FOLDER: usize = 2;
 const IMPOSTOR: i64 = 3;
+const ALICE: i64 = 10;
+const BOB: i64 = 12;
+const PAYPAL: i64 = 13;
+const FAMILY: i64 = 14;
 
 #[test]
 fn capture_demo_screens() {
@@ -204,6 +208,14 @@ fn profile_fits_beside_a_forum_with_many_topics() {
     assert_eq!(cx.update(|cx| app.read(cx).profile), None);
 }
 
+fn key(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, keystroke: &'static str) {
+    let keystroke = Keystroke::parse(keystroke).unwrap();
+    let event = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
+    cx.update_window(window.into(), |_, window, cx| _ = window.dispatch_event(PlatformInput::KeyDown(event), cx))
+        .unwrap();
+    cx.run_until_parked();
+}
+
 fn click(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, x: f32, y: f32) {
     press(cx, window, MouseButton::Left, x, y);
     cx.run_until_parked();
@@ -246,14 +258,7 @@ fn photos_open_full_window_and_escape_closes_them() {
         .unwrap();
         draw(&mut cx, window);
         cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/{name}.png")).unwrap();
-        let escape = KeyDownEvent {
-            keystroke: Keystroke::parse("escape").unwrap(),
-            is_held: false,
-            prefer_character_input: false,
-        };
-        cx.update_window(window.into(), |_, window, cx| _ = window.dispatch_event(PlatformInput::KeyDown(escape), cx))
-            .unwrap();
-        cx.run_until_parked();
+        key(&mut cx, window, "escape");
         assert!(cx.update(|cx| app.read(cx).overlay.is_none()), "Escape closes the {name}");
     }
 }
@@ -378,4 +383,62 @@ fn dropped_photos_are_attached_and_sent_with_the_caption() {
         let sent = &app.messages.last().unwrap().content;
         assert!(matches!(sent, SafeContent::Photo { caption, .. } if caption.to_string() == "Summit!"), "{sent:?}");
     });
+}
+
+/// Cmd-K lists the chats opened last first. Typing keeps names that start with the text, then names that contain it.
+#[test]
+fn command_k_jumps_to_chats_by_name_and_recency() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    let ranked = |cx: &mut HeadlessAppContext, query: &str| cx.update(|cx| app.read(cx).switcher_chats(query));
+    assert_eq!(
+        ranked(&mut cx, ""),
+        [FORUM, PAYPAL, ALICE, GROUP_CHAT, BOB, FAMILY],
+        "opened last, then Telegram's order"
+    );
+    assert_eq!(
+        ranked(&mut cx, "AL"),
+        [ALICE, PAYPAL],
+        "Alice starts with it; P?ypal, though opened later, only contains it"
+    );
+    assert_eq!(ranked(&mut cx, "e"), [FORUM, ALICE, GROUP_CHAT, BOB]);
+    assert!(ranked(&mut cx, "xyz").is_empty());
+
+    let switcher_open = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).switcher.is_some());
+    let query = |cx: &mut HeadlessAppContext, text: &str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            let switcher = app.read(cx).switcher.clone().unwrap();
+            switcher.update(cx, |switcher, cx| switcher.set_query(text, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    draw(&mut cx, window);
+    key(&mut cx, window, "cmd-k");
+    assert!(switcher_open(&mut cx));
+    query(&mut cx, "al");
+    screenshot(&mut cx, window, "switcher");
+    key(&mut cx, window, "down");
+    key(&mut cx, window, "enter");
+    assert!(!switcher_open(&mut cx));
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(PAYPAL), "Down then Enter opens the second match");
+    assert_eq!(ranked(&mut cx, "")[..2], [PAYPAL, FORUM], "the chat just opened comes first");
+
+    key(&mut cx, window, "cmd-k");
+    query(&mut cx, "rust");
+    key(&mut cx, window, "escape");
+    assert!(!switcher_open(&mut cx), "one Escape closes, even with text typed");
+    key(&mut cx, window, "cmd-k");
+    key(&mut cx, window, "cmd-k");
+    assert!(!switcher_open(&mut cx), "Cmd-K again closes");
+
+    key(&mut cx, window, "cmd-k");
+    screenshot(&mut cx, window, "switcher-recent");
+    click(&mut cx, window, 550., 245.);
+    assert!(!switcher_open(&mut cx));
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(ALICE), "a click on the third chat opens it");
+    key(&mut cx, window, "cmd-k");
+    click(&mut cx, window, 990., 550.);
+    assert!(!switcher_open(&mut cx), "a click outside closes");
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(ALICE));
 }
