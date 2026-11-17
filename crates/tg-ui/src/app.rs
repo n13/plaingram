@@ -25,8 +25,8 @@ use gpui_kit::component::{ActiveTheme as _, IconName, WindowExt as _, h_flex, v_
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
-    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, SafeAccountInfo,
-    SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeText, SafeTopic,
+    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, ReactionId,
+    SafeAccountInfo, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic,
     SafeUser, Sender, is_allowed, sanitize,
 };
 
@@ -150,8 +150,8 @@ pub(crate) enum Overlay {
     },
 }
 
-/// A deletion, ban or leaving that waits for the user to confirm it.
-#[derive(Clone, Copy)]
+/// A deletion, ban or leaving that waits for the user to confirm it, or a reaction to pick.
+#[derive(Clone)]
 pub(crate) enum Confirm {
     /// Deleting a message, with how Telegram allows it once known.
     Delete {
@@ -166,6 +166,12 @@ pub(crate) enum Confirm {
     },
     Leave {
         chat_id: i64,
+    },
+    /// Reacting to a message, with the emoji Telegram allows for it once known.
+    React {
+        chat_id: i64,
+        message_id: i64,
+        choices: Option<Vec<(SafeText, ReactionId)>>,
     },
 }
 
@@ -431,6 +437,13 @@ impl Plaingram {
                     *asked = Some(options);
                 }
             }
+            Event::AvailableReactions { chat_id, message_id, reactions } => {
+                if let Some(Confirm::React { chat_id: c, message_id: m, choices }) = &mut self.confirming
+                    && (*c, *m) == (chat_id, message_id)
+                {
+                    *choices = Some(reactions);
+                }
+            }
             Event::Moderator { chat_id, can_ban } => {
                 if can_ban {
                     self.moderated.insert(chat_id);
@@ -685,10 +698,12 @@ impl Plaingram {
         self.compose.focus_handle(cx).focus(window, cx);
     }
 
-    /// Asks to confirm, loading first how Telegram allows deleting a message.
+    /// Asks to confirm, loading first how Telegram allows deleting or reacting to a message.
     pub(crate) fn ask(&mut self, confirm: Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        if let Confirm::Delete { chat_id, message_id, .. } = confirm {
-            self.client.load_delete_options(chat_id, message_id);
+        match confirm {
+            Confirm::Delete { chat_id, message_id, .. } => self.client.load_delete_options(chat_id, message_id),
+            Confirm::React { chat_id, message_id, .. } => self.client.load_available_reactions(chat_id, message_id),
+            Confirm::Ban { .. } | Confirm::Leave { .. } => {}
         }
         self.confirming = Some(confirm);
         self.overlay_focus.focus(window, cx);
@@ -718,7 +733,7 @@ impl Plaingram {
                     self.clear_history(None, cx);
                 }
             }
-            None => {}
+            Some(Confirm::React { .. }) | None => {}
         }
         self.close_confirm(window, cx);
     }
@@ -1083,7 +1098,7 @@ impl Plaingram {
                     .when(self.theme.glow, |el| el.shadow(vec![glow(cx.theme().primary)]))
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
                     .child(self.render_content(&message.content, Some((app, message.date)), cx))
-                    .when(!message.reactions.is_empty(), |el| el.child(reactions(&message.reactions, cx)))
+                    .when(!message.reactions.is_empty(), |el| el.child(reactions(message, app, cx)))
                     .context_menu(move |menu, _, _| {
                         let menu = match download.clone() {
                             Some(download) => {
@@ -1091,6 +1106,8 @@ impl Plaingram {
                             }
                             None => menu,
                         };
+                        let react = Confirm::React { chat_id, message_id, choices: None };
+                        let menu = menu.item(ask_item(&menu_app, "React…", react));
                         let menu = menu.item(ask_item(
                             &menu_app,
                             "Delete",
@@ -1465,6 +1482,20 @@ impl Plaingram {
                 let question = SafeText::concat(&[&sanitize("Leave "), name(Sender::Chat(chat_id)), &sanitize("?")]);
                 (question, vec![choice("confirm-leave", "Leave group", true)])
             }
+            Confirm::React { choices: Some(choices), .. } if choices.is_empty() => {
+                (sanitize("Telegram does not allow reactions on this message."), Vec::new())
+            }
+            Confirm::React { chat_id, message_id, choices } => {
+                let emoji = choices.into_iter().flatten().enumerate().map(|(ix, (emoji, id))| {
+                    Button::new(("react", ix)).ghost().child(safe_text(&emoji, cx)).on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.client.react(chat_id, message_id, id.clone(), true);
+                            this.close_confirm(window, cx);
+                        },
+                    ))
+                });
+                (sanitize("React with"), emoji.collect())
+            }
         };
         let dialog = v_flex()
             .id("confirm")
@@ -1482,7 +1513,7 @@ impl Plaingram {
             }))
             .child(safe_text(&question, cx))
             .child(
-                h_flex().gap_2().justify_end().children(choices).child(
+                h_flex().flex_wrap().gap_2().justify_end().children(choices).child(
                     Button::new("cancel-confirm")
                         .label("Cancel")
                         .on_click(cx.listener(|this, _, window, cx| this.close_confirm(window, cx))),
@@ -1603,7 +1634,7 @@ impl Render for Plaingram {
                     .relative()
                     .child(body)
                     .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx)))
-                    .when_some(self.confirming, |el, confirm| el.child(self.render_confirm(confirm, cx)))
+                    .when_some(self.confirming.clone(), |el, confirm| el.child(self.render_confirm(confirm, cx)))
                     .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
             .when(self.scanlines || self.theme.glow, |el| el.child(crt(self.scanlines, self.theme.glow)))
@@ -1668,19 +1699,34 @@ fn pill(filled: bool, cx: &App) -> Div {
     }
 }
 
-/// Each reaction with how many chose it, filled where this account did.
-fn reactions(reactions: &[SafeReaction], cx: &App) -> Div {
-    h_flex().max_w_full().flex_wrap().gap_1().children(
-        reactions
-            .iter()
-            .map(|r| pill(r.chosen, cx).flex().gap_1().child(safe_text(&r.emoji, cx)).child(r.count.to_string())),
-    )
+/// Each reaction on `message` with how many chose it, filled where this account did; clicking an emoji one adds this
+/// account's reaction or takes it back.
+fn reactions(message: &SafeMessage, app: &Entity<Plaingram>, cx: &App) -> Div {
+    let (chat_id, message_id) = (message.chat_id, message.id);
+    h_flex().max_w_full().flex_wrap().gap_1().children(message.reactions.iter().enumerate().map(|(ix, reaction)| {
+        let chip = pill(reaction.chosen, cx)
+            .id(("reaction", ix))
+            .flex()
+            .gap_1()
+            .child(safe_text(&reaction.emoji, cx))
+            .child(reaction.count.to_string());
+        match reaction.id.clone() {
+            Some(id) => {
+                let (app, add) = (app.clone(), !reaction.chosen);
+                chip.cursor_pointer().on_click(move |_, _, cx| {
+                    app.update(cx, |this, _| this.client.react(chat_id, message_id, id.clone(), add))
+                })
+            }
+            None => chip,
+        }
+    }))
 }
 
 /// A menu item that asks to confirm `confirm`.
 fn ask_item(app: &Entity<Plaingram>, label: &'static str, confirm: Confirm) -> PopupMenuItem {
     let app = app.clone();
-    PopupMenuItem::new(label).on_click(move |_, window, cx| app.update(cx, |this, cx| this.ask(confirm, window, cx)))
+    PopupMenuItem::new(label)
+        .on_click(move |_, window, cx| app.update(cx, |this, cx| this.ask(confirm.clone(), window, cx)))
 }
 
 /// Dims the window under `content`, which sits near its top; a click outside calls `close`.

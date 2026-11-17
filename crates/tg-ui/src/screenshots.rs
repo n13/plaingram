@@ -13,7 +13,7 @@ use gpui_kit::{
 };
 use tg_core::{AuthStep, Demo, Event, SafeContent, SafeReaction, Sender, sanitize};
 
-use crate::app::{Overlay, Plaingram, Viewer};
+use crate::app::{Confirm, Overlay, Plaingram, Viewer};
 use crate::theme::{Palette, THEMES};
 
 const SCREENSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/screenshots");
@@ -484,7 +484,8 @@ fn right_clicking_a_message_deletes_it() {
     draw(&mut cx, window);
     let last = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).messages.last().map(|m| m.id));
     let doomed = last(&mut cx);
-    let deleting = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).confirming.is_some());
+    let deleting =
+        |cx: &mut HeadlessAppContext| cx.update(|cx| matches!(app.read(cx).confirming, Some(Confirm::Delete { .. })));
     let ask = |cx: &mut HeadlessAppContext| {
         press(cx, window, MouseButton::Right, 550., 649.);
         cx.run_until_parked();
@@ -575,7 +576,8 @@ fn moderators_can_delete_all_of_a_members_messages_and_ban_them() {
     let from_bob = |cx: &mut HeadlessAppContext| {
         cx.update(|cx| app.read(cx).messages.iter().filter(|m| m.sender == Sender::User(BOB_JONES)).count())
     };
-    let confirming = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).confirming.is_some());
+    let confirming =
+        |cx: &mut HeadlessAppContext| cx.update(|cx| matches!(app.read(cx).confirming, Some(Confirm::Ban { .. })));
     let ask = |cx: &mut HeadlessAppContext| {
         press(cx, window, MouseButton::Right, 550., 649.);
         cx.run_until_parked();
@@ -606,7 +608,7 @@ fn the_group_menu_leaves_the_group() {
     draw(&mut cx, window);
     screenshot(&mut cx, window, "group-menu");
     click(&mut cx, window, 1028., 91.);
-    assert!(cx.update(|cx| app.read(cx).confirming.is_some()), "Leave group asks first");
+    assert!(cx.update(|cx| matches!(app.read(cx).confirming, Some(Confirm::Leave { .. }))), "Leave group asks first");
     screenshot(&mut cx, window, "leave-group");
     click(&mut cx, window, 634., 156.);
     cx.run_until_parked();
@@ -631,7 +633,7 @@ fn reactions_show_under_messages_and_follow_updates() {
     cx.run_until_parked();
     screenshot(&mut cx, window, "reactions");
     let update = |cx: &mut HeadlessAppContext, chat_id, count| {
-        let reactions = vec![SafeReaction { emoji: sanitize("\u{1F44D}"), count, chosen: true }];
+        let reactions = vec![SafeReaction { emoji: sanitize("\u{1F44D}"), count, chosen: true, id: None }];
         let event = Event::Reactions { chat_id, message_id: WHOS_IN, reactions };
         cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.apply(event, window, cx)))
             .unwrap();
@@ -727,3 +729,57 @@ fn cli_proportional_draws_high_legibility_letters() {
     assert_ne!(plain, pixels(Palette::named("CLI proportional").unwrap().font_features()));
 }
 
+/// Clicking an emoji reaction under a message reacts with it or takes the reaction back, while custom emoji and paid
+/// ones do nothing; React… in the message's menu offers the emoji Telegram allows. Like Telegram without Premium, the
+/// demo keeps one reaction per person.
+#[test]
+fn reacting_from_the_chips_or_the_menu() {
+    const TRAIL_MAP: i64 = 5;
+    const HEART: (f32, f32) = (352., 394.);
+    const CUSTOM_EMOJI: (f32, f32) = (470., 394.);
+    const CAPTION: (f32, f32) = (448., 366.);
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    scroll_to(&mut cx, &app, 4);
+    cx.run_until_parked();
+    draw(&mut cx, window);
+    let shown = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| {
+            let message = app.read(cx).messages.iter().find(|m| m.id == TRAIL_MAP).unwrap();
+            message.reactions.iter().map(|r| (r.emoji.to_string(), r.count, r.chosen)).collect::<Vec<_>>()
+        })
+    };
+    let reaction = |emoji: &str, count, chosen| (emoji.to_string(), count, chosen);
+    let (custom, paid) = (reaction("custom emoji", 1, false), reaction("\u{2B50}", 1, false));
+    click(&mut cx, window, HEART.0, HEART.1);
+    cx.run_until_parked();
+    let heart = "\u{2764}\u{FE0F}";
+    assert_eq!(
+        shown(&mut cx),
+        [reaction(heart, 5, true), reaction("\u{1F525}", 1, false), custom.clone(), paid.clone()],
+        "the heart replaces the fire"
+    );
+    draw(&mut cx, window);
+    click(&mut cx, window, HEART.0, HEART.1);
+    cx.run_until_parked();
+    let before = [reaction(heart, 4, false), reaction("\u{1F525}", 1, false), custom, paid];
+    assert_eq!(shown(&mut cx), before, "clicking it again takes it back");
+    draw(&mut cx, window);
+    click(&mut cx, window, CUSTOM_EMOJI.0, CUSTOM_EMOJI.1);
+    cx.run_until_parked();
+    assert_eq!(shown(&mut cx), before, "custom emoji are never sent");
+
+    draw(&mut cx, window);
+    press(&mut cx, window, MouseButton::Right, CAPTION.0, CAPTION.1);
+    cx.run_until_parked();
+    draw(&mut cx, window);
+    click(&mut cx, window, 480., 404.);
+    cx.run_until_parked();
+    screenshot(&mut cx, window, "react-picker");
+    click(&mut cx, window, 387., 155.);
+    cx.run_until_parked();
+    assert!(cx.update(|cx| app.read(cx).confirming.is_none()), "picking closes the dialog");
+    assert_eq!(shown(&mut cx).last(), Some(&reaction("\u{1F44D}", 1, true)), "and reacts");
+}

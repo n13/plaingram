@@ -8,21 +8,23 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, BasicGroup, Chat, ChatActionBar, ChatList, ChatMemberStatus, ChatPhotos, ChatType, Chats, File,
-    ForumTopics, InputFile, InputMessageContent, Message, MessageProperties, MessageReplyTo, MessageSender,
-    MessageTopic, Messages, Supergroup, Update, User, UserFullInfo,
+    AuthorizationState, AvailableReactions, BasicGroup, Chat, ChatActionBar, ChatList, ChatMemberStatus, ChatPhotos,
+    ChatType, Chats, File, ForumTopics, InputFile, InputMessageContent, Message, MessageProperties, MessageReplyTo,
+    MessageSender, MessageTopic, Messages, ReactionType, Supergroup, Update, User, UserFullInfo,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
 
 use crate::image::{decode_jpeg, encode_jpeg, prepare_upload};
-use crate::model::{AuthStep, Backend, DeleteOptions, Event};
+use crate::model::{AuthStep, Backend, DeleteOptions, Event, ReactionId};
 use crate::paths;
 use crate::policy;
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
 const OLDER_SIZE: usize = 100;
+/// How many reactions TDLib counts as the top row of a message's available reactions.
+const REACTIONS_PER_ROW: i32 = 8;
 /// How many recently opened chats TDLib keeps.
 const RECENT_CHATS: i32 = 50;
 const TDLIB_PAGE_LIMIT: usize = 100;
@@ -212,6 +214,33 @@ impl Backend for Client {
         self.spawn(async move {
             this.ensure_allowed(chat_id)?;
             functions::leave_chat(chat_id, this.id()).await.map_err(td_error)
+        });
+    }
+
+    fn load_available_reactions(&self, chat_id: i64, message_id: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            let AvailableReactions::AvailableReactions(available) =
+                functions::get_message_available_reactions(chat_id, message_id, REACTIONS_PER_ROW, this.id())
+                    .await
+                    .map_err(td_error)?;
+            let reactions = policy::available_reactions(&available);
+            this.emit(Event::AvailableReactions { chat_id, message_id, reactions });
+            Ok(())
+        });
+    }
+
+    fn react(&self, chat_id: i64, message_id: i64, reaction: ReactionId, add: bool) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            let kind = ReactionType::Emoji(types::ReactionTypeEmoji { emoji: reaction.0 });
+            match add {
+                true => functions::add_message_reaction(chat_id, message_id, kind, false, true, this.id()).await,
+                false => functions::remove_message_reaction(chat_id, message_id, kind, this.id()).await,
+            }
+            .map_err(td_error)
         });
     }
 

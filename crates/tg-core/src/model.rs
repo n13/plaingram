@@ -154,6 +154,10 @@ pub struct SafeMessage {
     pub reactions: Vec<SafeReaction>,
 }
 
+/// An emoji reaction this account can add to a message or take back; which emoji stays inside tg-core.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ReactionId(pub(crate) String);
+
 /// One kind of reaction on a message and how many reacted with it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SafeReaction {
@@ -162,6 +166,8 @@ pub struct SafeReaction {
     pub count: i32,
     /// This account reacted with it.
     pub chosen: bool,
+    /// For emoji; custom emoji and paid reactions have none, as plaingram never sends them.
+    pub id: Option<ReactionId>,
 }
 
 /// The message another message replies to, or the quoted part of it.
@@ -185,6 +191,13 @@ pub enum Event {
     Moderator {
         chat_id: i64,
         can_ban: bool,
+    },
+    /// The emoji reactions this account may add to a message, from [`Backend::load_available_reactions`]; empty if
+    /// Telegram allows none.
+    AvailableReactions {
+        chat_id: i64,
+        message_id: i64,
+        reactions: Vec<(SafeText, ReactionId)>,
     },
     /// The reactions on a message changed.
     Reactions {
@@ -304,6 +317,10 @@ pub trait Backend {
     /// Bans a member from a group and deletes all their messages in it, where [`Event::Moderator`] allows it.
     fn ban_sender(&self, chat_id: i64, user_id: i64);
     fn leave_chat(&self, chat_id: i64);
+    /// Emits [`Event::AvailableReactions`].
+    fn load_available_reactions(&self, chat_id: i64, message_id: i64);
+    /// Adds this account's reaction to a message, or takes it back.
+    fn react(&self, chat_id: i64, message_id: i64, reaction: ReactionId, add: bool);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
     fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);

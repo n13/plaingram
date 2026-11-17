@@ -7,8 +7,8 @@ use td::enums::{
 use td::types;
 
 use crate::model::{
-    ChatKind, ChatListId, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFile, SafeFolder, SafeMessage,
-    SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
+    ChatKind, ChatListId, PhotoRef, ReactionId, SafeAccountInfo, SafeChat, SafeContent, SafeFile, SafeFolder,
+    SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{SafeText, sanitize, sanitize_name};
 
@@ -128,16 +128,40 @@ pub(crate) fn reactions(info: Option<&types::MessageInteractionInfo>) -> Vec<Saf
     reactions
         .reactions
         .iter()
-        .map(|reaction| SafeReaction {
-            emoji: match &reaction.r#type {
-                ReactionType::Emoji(emoji) => sanitize(&emoji.emoji),
-                ReactionType::CustomEmoji(_) => sanitize(CUSTOM_EMOJI),
-                ReactionType::Paid => sanitize(PAID),
-            },
-            count: reaction.total_count,
-            chosen: reaction.is_chosen,
+        .map(|reaction| {
+            let (emoji, id) = reaction_kind(&reaction.r#type);
+            SafeReaction { emoji, count: reaction.total_count, chosen: reaction.is_chosen, id }
         })
         .collect()
+}
+
+/// The emoji reactions this account may add, most used first, without ones that need Premium; none if Telegram
+/// allows no reactions on the message.
+pub(crate) fn available_reactions(available: &types::AvailableReactions) -> Vec<(SafeText, ReactionId)> {
+    if available.unavailability_reason.is_some() {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    available
+        .top_reactions
+        .iter()
+        .chain(&available.recent_reactions)
+        .chain(&available.popular_reactions)
+        .filter(|reaction| !reaction.needs_premium)
+        .filter_map(|reaction| match reaction_kind(&reaction.r#type) {
+            (emoji, Some(id)) => seen.insert(id.clone()).then_some((emoji, id)),
+            (_, None) => None,
+        })
+        .collect()
+}
+
+/// What a reaction shows as, and for an emoji, how to send it.
+fn reaction_kind(kind: &ReactionType) -> (SafeText, Option<ReactionId>) {
+    match kind {
+        ReactionType::Emoji(emoji) => (sanitize(&emoji.emoji), Some(ReactionId(emoji.emoji.clone()))),
+        ReactionType::CustomEmoji(_) => (sanitize(CUSTOM_EMOJI), None),
+        ReactionType::Paid => (sanitize(PAID), None),
+    }
 }
 
 pub(crate) fn sender(sender: &MessageSender) -> Sender {
@@ -356,7 +380,33 @@ mod tests {
             shown,
             [("\u{2764}\u{FE0F}".into(), 5, true), (CUSTOM_EMOJI.into(), 2, false), (PAID.into(), 1, false)]
         );
+        let sendable: Vec<_> = reactions(Some(&info)).into_iter().map(|r| r.id.is_some()).collect();
+        assert_eq!(sendable, [true, false, false], "custom emoji and paid reactions are never sent");
         assert!(reactions(None).is_empty());
+    }
+
+    #[test]
+    fn only_emoji_reactions_anyone_may_send_are_offered_once_each() {
+        let emoji = |emoji: &str| ReactionType::Emoji(types::ReactionTypeEmoji { emoji: emoji.into() });
+        let available = |r#type, needs_premium| types::AvailableReaction { r#type, needs_premium };
+        let mut reactions = types::AvailableReactions {
+            top_reactions: vec![available(emoji("\u{1F44D}"), false), available(ReactionType::Paid, false)],
+            recent_reactions: vec![available(emoji("\u{1F44D}"), false), available(emoji("\u{1F525}"), true)],
+            popular_reactions: vec![
+                available(ReactionType::CustomEmoji(types::ReactionTypeCustomEmoji { custom_emoji_id: 1 }), false),
+                available(emoji("\u{1F602}"), false),
+            ],
+            allow_custom_emoji: true,
+            are_tags: false,
+            unavailability_reason: None,
+        };
+        let offered = |reactions: &types::AvailableReactions| {
+            available_reactions(reactions).into_iter().map(|(shown, id)| (shown.to_string(), id.0)).collect::<Vec<_>>()
+        };
+        let both = |emoji: &str| (emoji.to_string(), emoji.to_string());
+        assert_eq!(offered(&reactions), [both("\u{1F44D}"), both("\u{1F602}")]);
+        reactions.unavailability_reason = Some(td::enums::ReactionUnavailabilityReason::Guest);
+        assert!(offered(&reactions).is_empty(), "Telegram allows no reactions");
     }
 
     fn kind(chat_type: ChatType) -> Option<ChatKind> {

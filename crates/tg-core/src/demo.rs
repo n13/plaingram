@@ -1,11 +1,13 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
-    AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent,
-    SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
+    AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, ReactionId, SafeAccountInfo, SafeChat,
+    SafeContent, SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::policy;
 use crate::text::{is_allowed, sanitize, sanitize_name};
@@ -49,12 +51,14 @@ const QR_LINK: &str = "tg://login?token=AQKm8fNnZrbRgP0x3sGg9lHn2vYq7kHbXzJc1tW4
 /// account moderates the hiking group.
 pub struct Demo {
     events: async_channel::Sender<Event>,
+    /// Reactions changed since the demo started, by chat and message.
+    reactions: RefCell<HashMap<(i64, i64), Vec<SafeReaction>>>,
 }
 
 impl Demo {
     pub fn start(signed_in: bool) -> (Self, Events) {
         let (events, receiver) = async_channel::unbounded();
-        let demo = Self { events };
+        let demo = Self { events, reactions: RefCell::default() };
         if signed_in {
             demo.sign_in()
         } else {
@@ -158,7 +162,12 @@ impl Backend for Demo {
     }
 
     fn open_chat(&self, chat_id: i64, topic: Option<i32>) {
-        let messages = history(chat_id, topic);
+        let mut messages = history(chat_id, topic);
+        for message in &mut messages {
+            if let Some(reactions) = self.reactions.borrow().get(&(chat_id, message.id)) {
+                message.reactions = reactions.clone();
+            }
+        }
         let reply = (chat_id == HIKING).then(|| {
             let (original, last) = (&messages[3], messages.last().expect("the hiking chat has messages"));
             (last.id, SafeReply { sender: Some(original.sender), content: original.content.clone() })
@@ -224,6 +233,35 @@ impl Backend for Demo {
         let message_ids =
             history(chat_id, None).iter().filter(|m| m.sender == Sender::User(user_id)).map(|m| m.id).collect();
         self.emit(Event::MessagesDeleted { chat_id, message_ids });
+    }
+
+    fn load_available_reactions(&self, chat_id: i64, message_id: i64) {
+        let reactions = AVAILABLE_REACTIONS.iter().map(|&emoji| (sanitize(emoji), ReactionId(emoji.into()))).collect();
+        self.emit(Event::AvailableReactions { chat_id, message_id, reactions });
+    }
+
+    /// Like Telegram without Premium, one reaction per message: adding one takes back the one before.
+    fn react(&self, chat_id: i64, message_id: i64, reaction: ReactionId, add: bool) {
+        let mut changed = self.reactions.borrow_mut();
+        let reactions = changed.entry((chat_id, message_id)).or_insert_with(|| reactions(chat_id, message_id));
+        for other in reactions.iter_mut().filter(|r| r.chosen && (!add || r.id.as_ref() != Some(&reaction))) {
+            other.count -= 1;
+            other.chosen = false;
+        }
+        if add {
+            match reactions.iter_mut().find(|r| r.id.as_ref() == Some(&reaction)) {
+                Some(picked) if !picked.chosen => (picked.count, picked.chosen) = (picked.count + 1, true),
+                Some(_) => {}
+                None => reactions.push(SafeReaction {
+                    emoji: sanitize(&reaction.0),
+                    count: 1,
+                    chosen: true,
+                    id: Some(reaction),
+                }),
+            }
+        }
+        reactions.retain(|r| r.count > 0);
+        self.emit(Event::Reactions { chat_id, message_id, reactions: reactions.clone() });
     }
 
     fn leave_chat(&self, chat_id: i64) {
@@ -336,9 +374,16 @@ fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeCo
     SafeMessage { id, chat_id, sender: Sender::User(from), date, outgoing: from == ME, topic, content, reactions }
 }
 
+/// What every demo message may be reacted with.
+const AVAILABLE_REACTIONS: [&str; 8] =
+    ["\u{1F44D}", "\u{2764}", "\u{1F525}", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F64F}", "\u{1F389}"];
+
 /// Reactions on a few hiking messages: counts, one this account chose, a custom emoji and a paid one.
 fn reactions(chat_id: i64, id: i64) -> Vec<SafeReaction> {
-    let reaction = |emoji: &str, count, chosen| SafeReaction { emoji: sanitize(emoji), count, chosen };
+    let reaction = |emoji: &str, count, chosen| {
+        let id = (emoji != policy::CUSTOM_EMOJI && emoji != policy::PAID).then(|| ReactionId(emoji.into()));
+        SafeReaction { emoji: sanitize(emoji), count, chosen, id }
+    };
     match (chat_id, id) {
         (HIKING, 2) => vec![reaction("\u{1F44D}", 3, true), reaction("\u{1F602}", 2, false)],
         (HIKING, 5) => vec![
