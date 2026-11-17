@@ -129,11 +129,15 @@ fn photos_load_only_on_or_approaching_the_screen() {
     open_chat(&mut cx, &app, FORUM);
     draw(&mut cx, window);
     let requested = |cx: &mut HeadlessAppContext| {
-        let mut ids: Vec<i64> = cx.update(|cx| app.read(cx).requested_photos.iter().map(|&id| id.into()).collect());
+        let mut ids: Vec<i64> = cx.update(|cx| app.read(cx).requested_photos.keys().map(|&id| id.into()).collect());
         ids.sort_unstable();
         ids
     };
+    let on_screen = |cx: &mut HeadlessAppContext, id: i64| {
+        cx.update(|cx| app.read(cx).requested_photos[&i32::try_from(id).unwrap()])
+    };
     assert_eq!(requested(&mut cx), [1000], "only the photo on screen loads");
+    assert!(on_screen(&mut cx, 1000), "the photo on screen downloads first");
     assert_eq!(cx.update(|cx| app.read(cx).download_progress.get(&1000).copied()), Some(0.42));
 
     scroll_to(&mut cx, &app, 10);
@@ -144,6 +148,13 @@ fn photos_load_only_on_or_approaching_the_screen() {
         "photos above load ahead of an upward scroll: {requested:?}, top {top}"
     );
     assert!(requested.iter().all(|&id| id + 31 >= top), "photos far above do not load: {requested:?}, top {top}");
+    let ahead = requested.into_iter().filter(|&id| id < top).max().unwrap();
+    assert!(!on_screen(&mut cx, ahead), "photos above wait for those on screen");
+
+    let ix = cx.update(|cx| app.read(cx).messages.iter().position(|m| m.id == ahead).unwrap());
+    scroll_to(&mut cx, &app, ix);
+    draw(&mut cx, window);
+    assert!(on_screen(&mut cx, ahead), "a photo that comes on screen moves ahead");
 }
 
 fn top_id(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>) -> i64 {
@@ -327,7 +338,7 @@ fn logging_out_from_settings_returns_to_the_qr_code() {
     let (window, app) = open_demo(&mut cx, true);
     open_chat(&mut cx, &app, GROUP_CHAT);
     draw(&mut cx, window);
-    click(&mut cx, window, 1053., 16.);
+    click(&mut cx, window, 1078., 16.);
     screenshot(&mut cx, window, "settings");
     click(&mut cx, window, 385., 298.);
     screenshot(&mut cx, window, "settings-log-out");
@@ -497,7 +508,7 @@ fn settings_turn_the_fps_counter_on_and_off() {
     let mut cx = headless();
     let (window, app) = open_demo(&mut cx, true);
     draw(&mut cx, window);
-    click(&mut cx, window, 1053., 16.);
+    click(&mut cx, window, 1078., 16.);
     let shown = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).fps.is_some());
     assert!(!shown(&mut cx), "off by default");
     click(&mut cx, window, 367., 264.);

@@ -232,7 +232,9 @@ impl Backend for Demo {
         }
     }
 
-    fn load_photo(&self, file_id: i32) {
+    fn hurry_photo(&self, _: i32) {}
+
+    fn load_photo(&self, file_id: i32, _: bool) {
         if file_id == SLOW_PHOTO {
             return self.emit(Event::DownloadProgress { file_id, progress: SLOW_PHOTO_PROGRESS });
         }

@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,7 +20,7 @@ use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerStat
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::TabBar;
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
@@ -95,7 +96,8 @@ pub struct Plaingram {
     /// What each message in `messages` replies to, by message id.
     replies: HashMap<i64, SafeReply>,
     photos: HashMap<i32, Arc<RenderImage>>,
-    pub(crate) requested_photos: HashSet<i32>,
+    /// Photos requested, and whether each was on screen, which downloads it before the rest.
+    pub(crate) requested_photos: HashMap<i32, bool>,
     /// How far each photo or file being downloaded has come, from 0 to 1.
     pub(crate) download_progress: HashMap<i32, f32>,
     pub(crate) overlay: Option<Overlay>,
@@ -232,7 +234,7 @@ impl Plaingram {
             viewed: 0,
             replies: HashMap::new(),
             photos: HashMap::new(),
-            requested_photos: HashSet::new(),
+            requested_photos: HashMap::new(),
             download_progress: HashMap::new(),
             overlay: None,
             attachments: Vec::new(),
@@ -335,7 +337,7 @@ impl Plaingram {
             }
             Event::Profile(profile) => {
                 if let Some(photo) = &profile.photo {
-                    self.request_photo(photo.file_id);
+                    self.request_photo(photo.file_id, true);
                 }
                 self.profiles.insert(profile.user_id, profile);
             }
@@ -533,34 +535,42 @@ impl Plaingram {
             false => first..last + 1 + ahead,
         };
         let rows = rows.start.min(self.messages.len())..rows.end.min(self.messages.len());
-        let photos: Vec<_> = self.messages[rows]
-            .iter()
-            .filter_map(|message| match &message.content {
-                SafeContent::Photo { photo, .. } => Some(photo.file_id),
+        let photos: Vec<_> = rows
+            .filter_map(|ix| match &self.messages[ix].content {
+                SafeContent::Photo { photo, .. } => Some((photo.file_id, (first..=last).contains(&ix))),
                 _ => None,
             })
             .collect();
         let mut requested = false;
-        for file_id in photos {
-            requested |= self.request_photo(file_id);
+        for (file_id, on_screen) in photos {
+            requested |= self.request_photo(file_id, on_screen);
         }
         if requested {
             cx.notify();
         }
     }
 
-    /// Starts downloading a photo unless it was requested before; returns whether it did.
-    fn request_photo(&mut self, file_id: i32) -> bool {
-        let new = self.requested_photos.insert(file_id);
-        if new {
-            self.client.load_photo(file_id);
+    /// Starts downloading a photo unless it was requested before, and hurries it once on screen; returns whether it
+    /// started.
+    fn request_photo(&mut self, file_id: i32, on_screen: bool) -> bool {
+        match self.requested_photos.entry(file_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(on_screen);
+                self.client.load_photo(file_id, on_screen);
+                true
+            }
+            Entry::Occupied(mut entry) => {
+                if on_screen && !entry.insert(true) && !self.photos.contains_key(&file_id) {
+                    self.client.hurry_photo(file_id);
+                }
+                false
+            }
         }
-        new
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
         if let Overlay::Photo(viewer) = &overlay {
-            self.request_photo(viewer.photo.file_id);
+            self.request_photo(viewer.photo.file_id, true);
         }
         self.overlay = Some(overlay);
         self.overlay_focus.focus(window, cx);
@@ -1346,7 +1356,7 @@ impl Plaingram {
                 .w(width)
                 .h(height)
                 .bg(cx.theme().muted)
-                .when(self.requested_photos.contains(&photo.file_id), |el| {
+                .when(self.requested_photos.contains_key(&photo.file_id), |el| {
                     let progress = self.download_progress.get(&photo.file_id).copied().unwrap_or_default();
                     el.child(
                         h_flex()
@@ -1412,11 +1422,15 @@ impl Render for Plaingram {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .children(self.fps.as_ref().map(|frames| format!("{} fps", frames.len())))
-                                .child(Button::new("settings").ghost().label("Settings").on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.open_overlay(Overlay::Settings { confirm_log_out: false }, window, cx)
-                                    },
-                                ))),
+                                .child(
+                                    Button::new("settings")
+                                        .ghost()
+                                        .icon(IconName::Settings)
+                                        .tooltip("Settings")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_overlay(Overlay::Settings { confirm_log_out: false }, window, cx)
+                                        })),
+                                ),
                         )
                     },
                 ),

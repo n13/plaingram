@@ -282,7 +282,10 @@ pub trait Backend {
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
     fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);
-    fn load_photo(&self, file_id: i32);
+    /// Downloads and decodes a photo, as an [`Event::Photo`]; photos on screen download before the rest.
+    fn load_photo(&self, file_id: i32, on_screen: bool);
+    /// Moves a photo [`Self::load_photo`] is downloading ahead of the rest, as it came on screen.
+    fn hurry_photo(&self, file_id: i32);
     /// Saves a photo to ~/Downloads as `name`, re-encoded so no byte from its sender reaches the disk.
     fn save_photo(&self, file_id: i32, name: String);
     /// Saves a file to ~/Downloads as `name`, or as TDLib named it when `name` is empty.

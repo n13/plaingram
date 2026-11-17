@@ -25,6 +25,9 @@ const OLDER_SIZE: usize = 100;
 /// How many recently opened chats TDLib keeps.
 const RECENT_CHATS: i32 = 50;
 const TDLIB_PAGE_LIMIT: usize = 100;
+/// TDLib's download priorities: photos on screen and saved files go before photos about to come on screen.
+const PRIORITY_ON_SCREEN: i32 = 32;
+const PRIORITY_AHEAD: i32 = 1;
 const KEYCHAIN_SERVICE: &str = "plaingram";
 const KEYCHAIN_DB_KEY: &str = "tdlib-database-key";
 const KEYCHAIN_API_CREDENTIALS: &str = "api-credentials";
@@ -283,13 +286,21 @@ impl Backend for Client {
         });
     }
 
-    fn load_photo(&self, file_id: i32) {
+    fn load_photo(&self, file_id: i32, on_screen: bool) {
+        let priority = if on_screen { PRIORITY_ON_SCREEN } else { PRIORITY_AHEAD };
         let this = self.clone();
         self.spawn(async move {
-            let path = this.download(file_id).await?;
+            let path = this.download(file_id, priority).await?;
             let image = tokio::task::spawn_blocking(move || decode_jpeg(&std::fs::read(path)?)).await??;
             this.emit(Event::Photo { file_id, image });
             Ok(())
+        });
+    }
+
+    fn hurry_photo(&self, file_id: i32) {
+        let id = self.id();
+        self.spawn(async move {
+            functions::download_file(file_id, PRIORITY_ON_SCREEN, 0, 0, false, id).await.map(drop).map_err(td_error)
         });
     }
 
@@ -565,8 +576,9 @@ impl Client {
     }
 
     /// Downloads a file completely and returns where TDLib keeps it.
-    async fn download(&self, file_id: i32) -> Result<PathBuf> {
-        let File::File(file) = functions::download_file(file_id, 1, 0, 0, true, self.id()).await.map_err(td_error)?;
+    async fn download(&self, file_id: i32, priority: i32) -> Result<PathBuf> {
+        let File::File(file) =
+            functions::download_file(file_id, priority, 0, 0, true, self.id()).await.map_err(td_error)?;
         ensure!(file.local.is_downloading_completed, "file {file_id} did not finish downloading");
         Ok(file.local.path.into())
     }
@@ -575,7 +587,7 @@ impl Client {
     fn save(&self, file_id: i32, save: impl FnOnce(PathBuf) -> Result<PathBuf> + Send + 'static) {
         let this = self.clone();
         self.spawn(async move {
-            let source = this.download(file_id).await?;
+            let source = this.download(file_id, PRIORITY_ON_SCREEN).await?;
             let path = tokio::task::spawn_blocking(move || save(source)).await??;
             this.emit(Event::Saved { file_id, path: sanitize(&path.display().to_string()) });
             Ok(())
