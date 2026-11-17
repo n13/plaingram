@@ -521,6 +521,10 @@ impl Client {
             Update::DeleteMessages(u) if u.is_permanent && self.is_allowed(u.chat_id) => {
                 self.emit(Event::MessagesDeleted { chat_id: u.chat_id, message_ids: u.message_ids });
             }
+            Update::MessageInteractionInfo(u) if self.is_allowed(u.chat_id) => {
+                let reactions = policy::reactions(u.interaction_info.as_ref());
+                self.emit(Event::Reactions { chat_id: u.chat_id, message_id: u.message_id, reactions });
+            }
             _ => {}
         }
         Ok(())

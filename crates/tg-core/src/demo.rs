@@ -5,8 +5,9 @@ use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
     AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent,
-    SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
+    SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
+use crate::policy;
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const ME: i64 = 1;
@@ -342,7 +343,24 @@ fn general(before: i64, count: i64) -> Vec<SafeMessage> {
 }
 
 fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeContent, date: i32) -> SafeMessage {
-    SafeMessage { id, chat_id, sender: Sender::User(from), date, outgoing: from == ME, topic, content }
+    let reactions = reactions(chat_id, id);
+    SafeMessage { id, chat_id, sender: Sender::User(from), date, outgoing: from == ME, topic, content, reactions }
+}
+
+/// Reactions on a few hiking messages: counts, one this account chose, a custom emoji and a paid one.
+fn reactions(chat_id: i64, id: i64) -> Vec<SafeReaction> {
+    let reaction = |emoji: &str, count, chosen| SafeReaction { emoji: sanitize(emoji), count, chosen };
+    match (chat_id, id) {
+        (HIKING, 2) => vec![reaction("\u{1F44D}", 3, true), reaction("\u{1F602}", 2, false)],
+        (HIKING, 5) => vec![
+            reaction("\u{2764}", 4, false),
+            reaction("\u{1F525}", 2, true),
+            reaction(policy::CUSTOM_EMOJI, 1, false),
+            reaction(policy::PAID, 1, false),
+        ],
+        (HIKING, 9) => vec![reaction("\u{1F389}", 2, false)],
+        _ => Vec::new(),
+    }
 }
 
 fn now() -> i32 {

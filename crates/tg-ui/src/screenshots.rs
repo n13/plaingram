@@ -7,7 +7,7 @@ use gpui_kit::{
     AppContext as _, Entity, ExternalPaths, FileDropEvent, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
 };
-use tg_core::{AuthStep, Demo, SafeContent, Sender};
+use tg_core::{AuthStep, Demo, Event, SafeContent, SafeReaction, Sender, sanitize};
 
 use crate::app::{Overlay, Plaingram, Viewer};
 
@@ -616,4 +616,35 @@ fn the_group_menu_leaves_the_group() {
         assert!(!app.switcher_chats("").contains(&FAKE_FAMILY), "and drops it from every list");
     });
     screenshot(&mut cx, window, "left-group");
+}
+
+/// Reactions show under a message with their counts, filled where this account reacted, and follow Telegram's
+/// updates for the open chat only, as message ids repeat across chats.
+#[test]
+fn reactions_show_under_messages_and_follow_updates() {
+    const WHOS_IN: i64 = 2;
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    scroll_to(&mut cx, &app, 4);
+    cx.run_until_parked();
+    screenshot(&mut cx, window, "reactions");
+    let update = |cx: &mut HeadlessAppContext, chat_id, count| {
+        let reactions = vec![SafeReaction { emoji: sanitize("\u{1F44D}"), count, chosen: true }];
+        let event = Event::Reactions { chat_id, message_id: WHOS_IN, reactions };
+        cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.apply(event, window, cx)))
+            .unwrap();
+    };
+    let counts = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| {
+            let message = app.read(cx).messages.iter().find(|m| m.id == WHOS_IN).unwrap();
+            message.reactions.iter().map(|r| r.count).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(counts(&mut cx), [3, 2]);
+    update(&mut cx, FORUM, 9);
+    assert_eq!(counts(&mut cx), [3, 2], "another chat's message with the same id is not this one");
+    update(&mut cx, GROUP_CHAT, 4);
+    assert_eq!(counts(&mut cx), [4]);
 }

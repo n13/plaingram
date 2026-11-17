@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 
-use td::enums::{ChatList, ChatType, MessageContent, MessageOrigin, MessageSender, MessageTopic, UserType};
+use td::enums::{
+    ChatList, ChatType, MessageContent, MessageOrigin, MessageSender, MessageTopic, ReactionType, UserType,
+};
 use td::types;
 
 use crate::model::{
     ChatKind, ChatListId, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFile, SafeFolder, SafeMessage,
-    SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
+    SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{SafeText, sanitize, sanitize_name};
 
@@ -112,7 +114,31 @@ pub(crate) fn message(message: &types::Message) -> SafeMessage {
             _ => None,
         },
         content: content(&message.content),
+        reactions: reactions(message.interaction_info.as_ref()),
     }
+}
+
+/// What a custom emoji reaction, a picture, shows as.
+pub(crate) const CUSTOM_EMOJI: &str = "custom emoji";
+/// What a paid reaction shows as: a star, as Telegram draws it.
+pub(crate) const PAID: &str = "\u{2B50}";
+
+/// The reactions on a message, in Telegram's order, most first.
+pub(crate) fn reactions(info: Option<&types::MessageInteractionInfo>) -> Vec<SafeReaction> {
+    let Some(reactions) = info.and_then(|info| info.reactions.as_ref()) else { return Vec::new() };
+    reactions
+        .reactions
+        .iter()
+        .map(|reaction| SafeReaction {
+            emoji: match &reaction.r#type {
+                ReactionType::Emoji(emoji) => sanitize(&emoji.emoji),
+                ReactionType::CustomEmoji(_) => sanitize(CUSTOM_EMOJI),
+                ReactionType::Paid => sanitize(PAID),
+            },
+            count: reaction.total_count,
+            chosen: reaction.is_chosen,
+        })
+        .collect()
 }
 
 pub(crate) fn sender(sender: &MessageSender) -> Sender {
@@ -210,6 +236,126 @@ pub(crate) fn variant_name(value: &impl Debug) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::is_allowed;
+
+    /// Telegram's standard reactions, as it sends them: some without the variation selector that makes them emoji.
+    const REACTIONS: [&str; 74] = [
+        "\u{1F44D}",
+        "\u{1F44E}",
+        "\u{2764}",
+        "\u{1F525}",
+        "\u{1F970}",
+        "\u{1F44F}",
+        "\u{1F601}",
+        "\u{1F914}",
+        "\u{1F92F}",
+        "\u{1F631}",
+        "\u{1F92C}",
+        "\u{1F622}",
+        "\u{1F389}",
+        "\u{1F929}",
+        "\u{1F92E}",
+        "\u{1F4A9}",
+        "\u{1F64F}",
+        "\u{1F44C}",
+        "\u{1F54A}",
+        "\u{1F921}",
+        "\u{1F971}",
+        "\u{1F974}",
+        "\u{1F60D}",
+        "\u{1F433}",
+        "\u{2764}\u{200D}\u{1F525}",
+        "\u{1F31A}",
+        "\u{1F32D}",
+        "\u{1F4AF}",
+        "\u{1F923}",
+        "\u{26A1}",
+        "\u{1F34C}",
+        "\u{1F3C6}",
+        "\u{1F494}",
+        "\u{1F928}",
+        "\u{1F610}",
+        "\u{1F353}",
+        "\u{1F37E}",
+        "\u{1F48B}",
+        "\u{1F595}",
+        "\u{1F608}",
+        "\u{1F634}",
+        "\u{1F62D}",
+        "\u{1F913}",
+        "\u{1F47B}",
+        "\u{1F468}\u{200D}\u{1F4BB}",
+        "\u{1F440}",
+        "\u{1F383}",
+        "\u{1F648}",
+        "\u{1F607}",
+        "\u{1F628}",
+        "\u{1F91D}",
+        "\u{270D}",
+        "\u{1F917}",
+        "\u{1FAE1}",
+        "\u{1F385}",
+        "\u{1F384}",
+        "\u{2603}",
+        "\u{1F485}",
+        "\u{1F92A}",
+        "\u{1F5FF}",
+        "\u{1F192}",
+        "\u{1F498}",
+        "\u{1F649}",
+        "\u{1F984}",
+        "\u{1F618}",
+        "\u{1F48A}",
+        "\u{1F64A}",
+        "\u{1F60E}",
+        "\u{1F47E}",
+        "\u{1F937}\u{200D}\u{2642}",
+        "\u{1F937}",
+        "\u{1F937}\u{200D}\u{2640}",
+        "\u{1F621}",
+        "\u{2B50}",
+    ];
+
+    #[test]
+    fn telegram_reactions_pass_the_allowlist() {
+        let blocked: Vec<_> = REACTIONS.iter().filter(|r| !is_allowed(r)).collect();
+        assert!(blocked.is_empty(), "{blocked:?}");
+        assert!(is_allowed(CUSTOM_EMOJI) && is_allowed(PAID));
+    }
+
+    #[test]
+    fn reactions_keep_telegrams_order_show_as_emoji_and_label_custom_and_paid_ones() {
+        let reaction = |r#type, total_count, is_chosen| types::MessageReaction {
+            r#type,
+            total_count,
+            is_chosen,
+            used_sender_id: None,
+            recent_sender_ids: Vec::new(),
+        };
+        let info = types::MessageInteractionInfo {
+            view_count: 0,
+            forward_count: 0,
+            reply_info: None,
+            reactions: Some(types::MessageReactions {
+                reactions: vec![
+                    reaction(ReactionType::Emoji(types::ReactionTypeEmoji { emoji: "\u{2764}".into() }), 5, true),
+                    reaction(
+                        ReactionType::CustomEmoji(types::ReactionTypeCustomEmoji { custom_emoji_id: 1 }),
+                        2,
+                        false,
+                    ),
+                    reaction(ReactionType::Paid, 1, false),
+                ],
+                are_tags: false,
+                paid_reactors: Vec::new(),
+                can_get_added_reactions: false,
+            }),
+        };
+        let shown: Vec<_> =
+            reactions(Some(&info)).into_iter().map(|r| (r.emoji.to_string(), r.count, r.chosen)).collect();
+        assert_eq!(shown, [("\u{2764}\u{FE0F}".into(), 5, true), (CUSTOM_EMOJI.into(), 2, false), (PAID.into(), 1, false)]);
+        assert!(reactions(None).is_empty());
+    }
 
     fn kind(chat_type: ChatType) -> Option<ChatKind> {
         chat_kind(&chat_type, &HashSet::from([7]), &HashSet::from([2]))

@@ -153,6 +153,17 @@ pub struct SafeMessage {
     /// The forum topic it was posted in.
     pub topic: Option<i32>,
     pub content: SafeContent,
+    pub reactions: Vec<SafeReaction>,
+}
+
+/// One kind of reaction on a message and how many reacted with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SafeReaction {
+    /// The emoji, or a label for a custom emoji, which is a picture.
+    pub emoji: SafeText,
+    pub count: i32,
+    /// This account reacted with it.
+    pub chosen: bool,
 }
 
 /// The message another message replies to, or the quoted part of it.
@@ -176,6 +187,12 @@ pub enum Event {
     Moderator {
         chat_id: i64,
         can_ban: bool,
+    },
+    /// The reactions on a message changed.
+    Reactions {
+        chat_id: i64,
+        message_id: i64,
+        reactions: Vec<SafeReaction>,
     },
     /// Messages gone from a chat, deleted here or by someone else.
     MessagesDeleted {

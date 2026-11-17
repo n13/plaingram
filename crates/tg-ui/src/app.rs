@@ -25,8 +25,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
     AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, SafeAccountInfo,
-    SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic, SafeUser, Sender,
-    borrowed_names, is_allowed, sanitize,
+    SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeText, SafeTopic,
+    SafeUser, Sender, borrowed_names, is_allowed, sanitize,
 };
 
 use crate::safe_text::{name_label, name_warnings, safe_text, warning};
@@ -273,7 +273,7 @@ impl Plaingram {
         }
     }
 
-    fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::Auth(step) => self.set_auth(step, window, cx),
             Event::User(user) => self.refold(Sender::User(user.id), |this| _ = this.users.insert(user.id, user)),
@@ -392,6 +392,12 @@ impl Plaingram {
                     self.moderated.remove(&chat_id);
                 }
             }
+            Event::Reactions { chat_id, message_id, reactions } if self.open_chat == Some(chat_id) => {
+                if let Some(ix) = self.messages.iter().position(|m| m.id == message_id) {
+                    self.messages[ix].reactions = reactions;
+                    self.scroller.update(cx, |scroller, cx| _ = scroller.remeasure_items(ix..ix + 1, cx));
+                }
+            }
             Event::MessagesDeleted { chat_id, message_ids } if self.open_chat == Some(chat_id) => {
                 for id in message_ids {
                     if let Some(ix) = self.messages.iter().position(|m| m.id == id) {
@@ -408,6 +414,7 @@ impl Plaingram {
             | Event::Topic { .. }
             | Event::Reply { .. }
             | Event::Message(_)
+            | Event::Reactions { .. }
             | Event::MessagesDeleted { .. } => {}
         }
         cx.notify();
@@ -946,17 +953,7 @@ impl Plaingram {
             .when(!self.lookalike_warnings(Self::chat_who(chat)).is_empty(), |el| {
                 el.child(warning("look-alike".into(), cx))
             })
-            .when(chat.unread > 0, |el| {
-                el.child(
-                    div()
-                        .px_2()
-                        .rounded_full()
-                        .text_xs()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .child(chat.unread.to_string()),
-                )
-            })
+            .when(chat.unread > 0, |el| el.child(pill(true, cx).child(chat.unread.to_string())))
     }
 
     fn render_conversation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1108,6 +1105,7 @@ impl Plaingram {
                     .bg(bubble)
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
                     .child(self.render_content(&message.content, Some((app, message.date)), cx))
+                    .when(!message.reactions.is_empty(), |el| el.child(reactions(&message.reactions, cx)))
                     .context_menu(move |menu, _, _| {
                         let menu = match download.clone() {
                             Some(download) => {
@@ -1618,6 +1616,24 @@ impl Render for Plaingram {
                     .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
     }
+}
+
+/// A small rounded label, filled with the primary color or outlined.
+fn pill(filled: bool, cx: &App) -> Div {
+    let pill = div().px_2().rounded_full().text_xs().border_1();
+    match filled {
+        true => pill.bg(cx.theme().primary).border_color(cx.theme().primary).text_color(cx.theme().primary_foreground),
+        false => pill.border_color(cx.theme().border),
+    }
+}
+
+/// Each reaction with how many chose it, filled where this account did.
+fn reactions(reactions: &[SafeReaction], cx: &App) -> Div {
+    h_flex().max_w_full().flex_wrap().gap_1().children(
+        reactions
+            .iter()
+            .map(|r| pill(r.chosen, cx).flex().gap_1().child(safe_text(&r.emoji, cx)).child(r.count.to_string())),
+    )
 }
 
 /// A menu item that asks to confirm `confirm`.
