@@ -329,16 +329,16 @@ fn logging_out_from_settings_returns_to_the_qr_code() {
     draw(&mut cx, window);
     click(&mut cx, window, 1053., 16.);
     screenshot(&mut cx, window, "settings");
-    click(&mut cx, window, 385., 268.);
+    click(&mut cx, window, 385., 298.);
     screenshot(&mut cx, window, "settings-log-out");
-    click(&mut cx, window, 458., 342.);
+    click(&mut cx, window, 458., 372.);
     let overlay = |cx: &mut HeadlessAppContext, confirm: bool| {
         cx.update(|cx| matches!(app.read(cx).overlay, Some(Overlay::Settings { confirm_log_out }) if confirm_log_out == confirm))
     };
     assert!(overlay(&mut cx, false), "Cancel keeps the account");
-    click(&mut cx, window, 385., 268.);
+    click(&mut cx, window, 385., 298.);
     assert!(overlay(&mut cx, true));
-    click(&mut cx, window, 384., 342.);
+    click(&mut cx, window, 384., 372.);
     cx.update(|cx| {
         let app = app.read(cx);
         assert!(matches!(app.auth, Some(AuthStep::Qr { .. })), "a fresh sign-in starts at the QR code");
@@ -489,4 +489,20 @@ fn the_last_opened_chat_opens_at_start() {
 #[test]
 fn the_app_menu_sets_up() {
     headless().update(crate::app_menu);
+}
+
+/// Settings has a switch for the FPS counter in the title bar.
+#[test]
+fn settings_turn_the_fps_counter_on_and_off() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    draw(&mut cx, window);
+    click(&mut cx, window, 1053., 16.);
+    let shown = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).fps.is_some());
+    assert!(!shown(&mut cx), "off by default");
+    click(&mut cx, window, 367., 264.);
+    assert!(shown(&mut cx));
+    screenshot(&mut cx, window, "settings-fps");
+    click(&mut cx, window, 367., 264.);
+    assert!(!shown(&mut cx));
 }

@@ -17,6 +17,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -113,6 +114,8 @@ pub struct Plaingram {
     /// When each recent frame was drawn and its top row, for the scroll velocity.
     scroll_samples: VecDeque<(Instant, usize)>,
     error: Option<SafeText>,
+    /// When each frame of the last second was drawn, while Settings shows FPS in the title bar.
+    pub(crate) fps: Option<VecDeque<Instant>>,
     _subscriptions: [Subscription; 5],
     _tasks: [Task<()>; 2],
 }
@@ -190,9 +193,14 @@ impl Plaingram {
             }
         });
         let clock = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(60)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+            for second in 1u64.. {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let redraw = |this: &mut Self, cx: &mut Context<Self>| {
+                    if this.fps.is_some() || second.is_multiple_of(60) {
+                        cx.notify();
+                    }
+                };
+                if this.update(cx, redraw).is_err() {
                     return;
                 }
             }
@@ -234,6 +242,7 @@ impl Plaingram {
             visible_rows: Rc::default(),
             scroll_samples: VecDeque::new(),
             error: None,
+            fps: None,
             _subscriptions: subscriptions,
             _tasks: [events_task, clock],
         }
@@ -1196,6 +1205,12 @@ impl Plaingram {
                     muted,
                 ))
                 .child(fact("Version", env!("CARGO_PKG_VERSION").into(), muted))
+                .child(Switch::new("show-fps").checked(self.fps.is_some()).label("Show FPS in the title bar").on_click(
+                    cx.listener(|this, &show: &bool, _, cx| {
+                        this.fps = show.then(VecDeque::new);
+                        cx.notify();
+                    }),
+                ))
                 .child(log_out),
         )
     }
@@ -1320,6 +1335,13 @@ impl Plaingram {
 impl Render for Plaingram {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.visible_rows.set(None);
+        if let Some(frames) = &mut self.fps {
+            let now = Instant::now();
+            frames.push_back(now);
+            while frames.front().is_some_and(|&frame| now - frame > Duration::from_secs(1)) {
+                frames.pop_front();
+            }
+        }
         cx.defer_in(window, |this, _, cx| this.load_photos_in_view(cx));
         let body = match self.auth {
             Some(AuthStep::Ready) => h_flex()
@@ -1340,11 +1362,19 @@ impl Render for Plaingram {
                 TitleBar::new().child(div().text_sm().text_color(cx.theme().muted_foreground).child("plaingram")).when(
                     self.auth == Some(AuthStep::Ready),
                     |el| {
-                        el.child(div().pr_2().child(Button::new("settings").ghost().label("Settings").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.open_overlay(Overlay::Settings { confirm_log_out: false }, window, cx)
-                            }),
-                        )))
+                        el.child(
+                            h_flex()
+                                .pr_2()
+                                .gap_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .children(self.fps.as_ref().map(|frames| format!("{} fps", frames.len())))
+                                .child(Button::new("settings").ghost().label("Settings").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.open_overlay(Overlay::Settings { confirm_log_out: false }, window, cx)
+                                    },
+                                ))),
+                        )
                     },
                 ),
             )
