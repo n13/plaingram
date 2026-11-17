@@ -19,6 +19,7 @@ const GROUPS_FOLDER: usize = 2;
 const IMPOSTOR: i64 = 3;
 const ALICE: i64 = 10;
 const BOB: i64 = 12;
+const BOB_JONES: i64 = 4;
 const PAYPAL: i64 = 13;
 const FAMILY: i64 = 14;
 const FAKE_FAMILY: i64 = 17;
@@ -483,7 +484,7 @@ fn right_clicking_a_message_deletes_it() {
     draw(&mut cx, window);
     let last = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).messages.last().map(|m| m.id));
     let doomed = last(&mut cx);
-    let deleting = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).deleting.is_some());
+    let deleting = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).confirming.is_some());
     let ask = |cx: &mut HeadlessAppContext| {
         press(cx, window, MouseButton::Right, 550., 649.);
         cx.run_until_parked();
@@ -561,4 +562,58 @@ fn signing_in_again_after_logging_out_opens_the_chats() {
     cx.update(|cx| app.read(cx).client.submit_password(String::new()));
     cx.run_until_parked();
     assert_eq!(cx.update(|cx| app.read(cx).auth.clone()), Some(AuthStep::Ready));
+}
+
+/// The demo account moderates the hiking group: right-clicking another member's message also offers to delete all
+/// their messages and ban them, after asking.
+#[test]
+fn moderators_can_delete_all_of_a_members_messages_and_ban_them() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    let from_bob = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| app.read(cx).messages.iter().filter(|m| m.sender == Sender::User(BOB_JONES)).count())
+    };
+    let confirming = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).confirming.is_some());
+    let ask = |cx: &mut HeadlessAppContext| {
+        press(cx, window, MouseButton::Right, 550., 649.);
+        cx.run_until_parked();
+        draw(cx, window);
+        click(cx, window, 600., 687.);
+    };
+    ask(&mut cx);
+    assert!(confirming(&mut cx), "Delete all and ban asks first");
+    screenshot(&mut cx, window, "ban-member");
+    key(&mut cx, window, "escape");
+    assert!(!confirming(&mut cx) && from_bob(&mut cx) > 0, "Escape cancels");
+
+    ask(&mut cx);
+    draw(&mut cx, window);
+    click(&mut cx, window, 608., 178.);
+    assert_eq!(from_bob(&mut cx), 0, "confirming deletes all their messages");
+}
+
+/// The menu beside a group's name leaves it, after asking.
+#[test]
+fn the_group_menu_leaves_the_group() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, FAKE_FAMILY);
+    draw(&mut cx, window);
+    click(&mut cx, window, 1075., 58.);
+    cx.run_until_parked();
+    draw(&mut cx, window);
+    screenshot(&mut cx, window, "group-menu");
+    click(&mut cx, window, 1028., 91.);
+    assert!(cx.update(|cx| app.read(cx).confirming.is_some()), "Leave group asks first");
+    screenshot(&mut cx, window, "leave-group");
+    click(&mut cx, window, 634., 156.);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(app.open_chat, None, "confirming closes the group");
+        assert!(!app.switcher_chats("").contains(&FAKE_FAMILY), "and drops it from every list");
+    });
+    screenshot(&mut cx, window, "left-group");
 }

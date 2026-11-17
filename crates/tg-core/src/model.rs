@@ -172,6 +172,11 @@ pub enum Event {
         message_id: i64,
         options: DeleteOptions,
     },
+    /// Whether this account may delete all messages of a member of the group and ban them, sent as the group opens.
+    Moderator {
+        chat_id: i64,
+        can_ban: bool,
+    },
     /// Messages gone from a chat, deleted here or by someone else.
     MessagesDeleted {
         chat_id: i64,
@@ -269,7 +274,7 @@ pub trait Backend {
     fn submit_password(&self, password: String);
     /// Logs out and deletes everything TDLib stored, then starts over at sign-in.
     fn log_out(&self);
-    /// Loads the history of a chat, or of one topic in a forum.
+    /// Loads the history of a chat, or of one topic in a forum, then for a group sends an [`Event::Moderator`].
     fn open_chat(&self, chat_id: i64, topic: Option<i32>);
     /// Tells TDLib the user left a chat [`Self::open_chat`] opened.
     fn close_chat(&self, chat_id: i64);
@@ -281,6 +286,9 @@ pub trait Backend {
     /// Emits [`Event::DeleteOptions`].
     fn load_delete_options(&self, chat_id: i64, message_id: i64);
     fn delete_message(&self, chat_id: i64, message_id: i64, for_everyone: bool);
+    /// Bans a member from a group and deletes all their messages in it, where [`Event::Moderator`] allows it.
+    fn ban_sender(&self, chat_id: i64, user_id: i64);
+    fn leave_chat(&self, chat_id: i64);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
     fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);

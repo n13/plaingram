@@ -46,7 +46,8 @@ const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
 /// Shaped like the links TDLib sends, so the demo QR code is as dense as a real one.
 const QR_LINK: &str = "tg://login?token=AQKm8fNnZrbRgP0x3sGg9lHn2vYq7kHbXzJc1tW4eQdUoLsA";
 
-/// Offline backend with fixed fixtures, for UI development and screenshots. All text goes through [`sanitize`].
+/// Offline backend with fixed fixtures, for UI development and screenshots. All text goes through [`sanitize`]. The
+/// account moderates the hiking group.
 pub struct Demo {
     events: async_channel::Sender<Event>,
 }
@@ -172,6 +173,9 @@ impl Backend for Demo {
         if let Some((message_id, reply)) = reply {
             self.emit(Event::Reply { chat_id, message_id, reply });
         }
+        if chat_id == HIKING {
+            self.emit(Event::Moderator { chat_id, can_ban: true });
+        }
     }
 
     fn close_chat(&self, _: i64) {}
@@ -220,6 +224,18 @@ impl Backend for Demo {
 
     fn delete_message(&self, chat_id: i64, message_id: i64, _: bool) {
         self.emit(Event::MessagesDeleted { chat_id, message_ids: vec![message_id] });
+    }
+
+    fn ban_sender(&self, chat_id: i64, user_id: i64) {
+        let message_ids =
+            history(chat_id, None).iter().filter(|m| m.sender == Sender::User(user_id)).map(|m| m.id).collect();
+        self.emit(Event::MessagesDeleted { chat_id, message_ids });
+    }
+
+    fn leave_chat(&self, chat_id: i64) {
+        for list in [ChatListId::Main, ChatListId::Archive, ChatListId::Folder(1), ChatListId::Folder(2)] {
+            self.emit(Event::ChatPosition { chat_id, list, order: 0 });
+        }
     }
 
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String) {

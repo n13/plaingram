@@ -8,8 +8,9 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, ChatActionBar, ChatList, ChatPhotos, Chats, File, ForumTopics, InputFile, InputMessageContent,
-    Message, MessageProperties, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
+    AuthorizationState, BasicGroup, Chat, ChatActionBar, ChatList, ChatMemberStatus, ChatPhotos, ChatType, Chats, File,
+    ForumTopics, InputFile, InputMessageContent, Message, MessageProperties, MessageReplyTo, MessageSender,
+    MessageTopic, Messages, Supergroup, Update, User, UserFullInfo,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
@@ -166,7 +167,51 @@ impl Backend for Client {
             let history = this.history(chat_id, topic, 0, HISTORY_SIZE).await?;
             this.emit(Event::History { chat_id, topic, messages: history.iter().map(policy::message).collect() });
             history.iter().for_each(|message| this.load_reply(message));
+            let Chat::Chat(chat) = functions::get_chat(chat_id, this.id()).await.map_err(td_error)?;
+            let status = match chat.r#type {
+                ChatType::Supergroup(group) => {
+                    let Supergroup::Supergroup(group) =
+                        functions::get_supergroup(group.supergroup_id, this.id()).await.map_err(td_error)?;
+                    group.status
+                }
+                ChatType::BasicGroup(group) => {
+                    let BasicGroup::BasicGroup(group) =
+                        functions::get_basic_group(group.basic_group_id, this.id()).await.map_err(td_error)?;
+                    group.status
+                }
+                ChatType::Private(_) | ChatType::Secret(_) => return Ok(()),
+            };
+            let can_ban = match status {
+                ChatMemberStatus::Creator(_) => true,
+                ChatMemberStatus::Administrator(admin) => {
+                    admin.rights.can_delete_messages && admin.rights.can_restrict_members
+                }
+                _ => false,
+            };
+            this.emit(Event::Moderator { chat_id, can_ban });
             Ok(())
+        });
+    }
+
+    fn ban_sender(&self, chat_id: i64, user_id: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            let member = MessageSender::User(types::MessageSenderUser { user_id });
+            functions::ban_chat_member(chat_id, member.clone(), 0, true, this.id()).await.map_err(td_error)?;
+            let Chat::Chat(chat) = functions::get_chat(chat_id, this.id()).await.map_err(td_error)?;
+            if matches!(chat.r#type, ChatType::Supergroup(_)) {
+                functions::delete_chat_messages_by_sender(chat_id, member, this.id()).await.map_err(td_error)?;
+            }
+            Ok(())
+        });
+    }
+
+    fn leave_chat(&self, chat_id: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            functions::leave_chat(chat_id, this.id()).await.map_err(td_error)
         });
     }
 

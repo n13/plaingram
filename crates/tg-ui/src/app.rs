@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -53,7 +53,7 @@ const ATTACHMENT_SIZE: f32 = 96.;
 const SWITCHER_WIDTH: f32 = 480.;
 /// How far below the title bar a dialog sits.
 const MODAL_TOP: f32 = 60.;
-const DELETE_WIDTH: f32 = 440.;
+const CONFIRM_WIDTH: f32 = 440.;
 const SWITCHER_LIST_HEIGHT: f32 = 420.;
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
@@ -108,8 +108,10 @@ pub struct Plaingram {
     pub(crate) attachments: Vec<PathBuf>,
     /// The chat switcher, open over everything.
     pub(crate) switcher: Option<Entity<CommandState>>,
-    /// The message whose Delete was picked, until the user chooses how.
-    pub(crate) deleting: Option<Deleting>,
+    /// What waits for the user to confirm it, over the chat.
+    pub(crate) confirming: Option<Confirm>,
+    /// Groups where this account may delete all messages of a member and ban them.
+    moderated: HashSet<i64>,
     overlay_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
@@ -136,11 +138,23 @@ pub(crate) enum Overlay {
     },
 }
 
-/// A message to delete, with how Telegram allows it once known.
-pub(crate) struct Deleting {
-    chat_id: i64,
-    message_id: i64,
-    options: Option<DeleteOptions>,
+/// A deletion, ban or leaving that waits for the user to confirm it.
+#[derive(Clone, Copy)]
+pub(crate) enum Confirm {
+    /// Deleting a message, with how Telegram allows it once known.
+    Delete {
+        chat_id: i64,
+        message_id: i64,
+        options: Option<DeleteOptions>,
+    },
+    /// Deleting all messages of a member of the group and banning them.
+    Ban {
+        chat_id: i64,
+        user_id: i64,
+    },
+    Leave {
+        chat_id: i64,
+    },
 }
 
 /// A photo shown over the whole window.
@@ -244,7 +258,8 @@ impl Plaingram {
             overlay: None,
             attachments: Vec::new(),
             switcher: None,
-            deleting: None,
+            confirming: None,
+            moderated: HashSet::new(),
             overlay_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
@@ -364,10 +379,17 @@ impl Plaingram {
                 }
             }
             Event::DeleteOptions { chat_id, message_id, options } => {
-                if let Some(deleting) =
-                    self.deleting.as_mut().filter(|d| d.chat_id == chat_id && d.message_id == message_id)
+                if let Some(Confirm::Delete { chat_id: c, message_id: m, options: asked }) = &mut self.confirming
+                    && (*c, *m) == (chat_id, message_id)
                 {
-                    deleting.options = Some(options);
+                    *asked = Some(options);
+                }
+            }
+            Event::Moderator { chat_id, can_ban } => {
+                if can_ban {
+                    self.moderated.insert(chat_id);
+                } else {
+                    self.moderated.remove(&chat_id);
                 }
             }
             Event::MessagesDeleted { chat_id, message_ids } if self.open_chat == Some(chat_id) => {
@@ -459,7 +481,7 @@ impl Plaingram {
         self.recent.retain(|&id| id != chat_id);
         self.recent.insert(0, chat_id);
         self.attachments.clear();
-        self.deleting = None;
+        self.confirming = None;
         self.topics.clear();
         self.clear_history(None, cx);
         if self.chats.get(&chat_id).is_some_and(|chat| chat.kind == ChatKind::Forum) {
@@ -610,24 +632,42 @@ impl Plaingram {
         self.compose.focus_handle(cx).focus(window, cx);
     }
 
-    pub(crate) fn ask_delete(&mut self, chat_id: i64, message_id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.client.load_delete_options(chat_id, message_id);
-        self.deleting = Some(Deleting { chat_id, message_id, options: None });
+    /// Asks to confirm, loading first how Telegram allows deleting a message.
+    pub(crate) fn ask(&mut self, confirm: Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if let Confirm::Delete { chat_id, message_id, .. } = confirm {
+            self.client.load_delete_options(chat_id, message_id);
+        }
+        self.confirming = Some(confirm);
         self.overlay_focus.focus(window, cx);
         cx.notify();
     }
 
-    fn close_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.deleting = None;
+    fn close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirming = None;
         self.focus_compose(window, cx);
         cx.notify();
     }
 
-    fn delete(&mut self, for_everyone: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(deleting) = self.deleting.take() {
-            self.client.delete_message(deleting.chat_id, deleting.message_id, for_everyone);
+    /// Does what waits for confirmation; `for_everyone` picks how to delete a message.
+    fn confirm(&mut self, for_everyone: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.confirming.take() {
+            Some(Confirm::Delete { chat_id, message_id, .. }) => {
+                self.client.delete_message(chat_id, message_id, for_everyone)
+            }
+            Some(Confirm::Ban { chat_id, user_id }) => self.client.ban_sender(chat_id, user_id),
+            Some(Confirm::Leave { chat_id }) => {
+                self.client.leave_chat(chat_id);
+                self.recent.retain(|&id| id != chat_id);
+                if self.open_chat == Some(chat_id) {
+                    self.client.close_chat(chat_id);
+                    self.open_chat = None;
+                    self.topics.clear();
+                    self.clear_history(None, cx);
+                }
+            }
+            None => {}
         }
-        self.close_delete(window, cx);
+        self.close_confirm(window, cx);
     }
 
     fn jump_to(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -940,13 +980,24 @@ impl Plaingram {
             )
             .child({
                 let header = h_flex().id("chat-header").p_3().border_b_1().border_color(cx.theme().border);
-                let header = match chat.kind {
+                let name = self.warned_name(&self.chat_title(chat), Self::chat_who(chat), cx).flex_1().min_w_0();
+                match chat.kind {
                     ChatKind::Private { user_id } | ChatKind::Secret { user_id } => header
                         .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_profile(user_id, cx))),
-                    ChatKind::Group | ChatKind::Forum => header,
-                };
-                header.child(self.warned_name(&self.chat_title(chat), Self::chat_who(chat), cx))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_profile(user_id, cx)))
+                        .child(name),
+                    ChatKind::Group | ChatKind::Forum => {
+                        let (app, chat_id) = (app.clone(), chat.id);
+                        header.child(name).child(
+                            Button::new("chat-menu")
+                                .ghost()
+                                .icon(IconName::EllipsisVertical)
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                    menu.item(ask_item(&app, "Leave group", Confirm::Leave { chat_id }))
+                                }),
+                        )
+                    }
+                }
             })
             .when(!self.topics.is_empty(), |el| {
                 let selected = self.topics.iter().position(|t| Some(t.id) == self.topic).unwrap_or_default();
@@ -1039,6 +1090,10 @@ impl Plaingram {
         let bubble = if message.outgoing { cx.theme().accent } else { cx.theme().secondary };
         let (download, chat_id, message_id, menu_app) =
             (download(&message.content, message.date, app), message.chat_id, message.id, app.clone());
+        let ban = match message.sender {
+            Sender::User(user_id) if self.moderated.contains(&chat_id) && !self.is_me(user_id) => Some(user_id),
+            _ => None,
+        };
         v_flex()
             .px_4()
             .py_1()
@@ -1060,10 +1115,17 @@ impl Plaingram {
                             }
                             None => menu,
                         };
-                        let app = menu_app.clone();
-                        menu.item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
-                            app.update(cx, |this, cx| this.ask_delete(chat_id, message_id, window, cx))
-                        }))
+                        let menu = menu.item(ask_item(
+                            &menu_app,
+                            "Delete",
+                            Confirm::Delete { chat_id, message_id, options: None },
+                        ));
+                        match ban {
+                            Some(user_id) => {
+                                menu.item(ask_item(&menu_app, "Delete all and ban", Confirm::Ban { chat_id, user_id }))
+                            }
+                            None => menu,
+                        }
                     }),
             )
             .into_any_element()
@@ -1376,24 +1438,50 @@ impl Plaingram {
         modal(switcher, Self::close_switcher, cx)
     }
 
-    /// Asks how to delete a message, offering only what Telegram allows for it.
-    fn render_delete(&self, deleting: &Deleting, cx: &mut Context<Self>) -> Div {
-        let options = deleting.options;
+    /// Asks to confirm a deletion, ban or leave; for a message, it offers only what Telegram allows.
+    fn render_confirm(&self, confirm: Confirm, cx: &mut Context<Self>) -> Div {
         let choice = |id: &'static str, label: &'static str, for_everyone: bool| {
             Button::new(id)
                 .danger()
                 .label(label)
-                .on_click(cx.listener(move |this, _, window, cx| this.delete(for_everyone, window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.confirm(for_everyone, window, cx)))
         };
-        let question = match options {
-            Some(DeleteOptions { for_me: false, for_everyone: false }) => {
-                "Telegram does not allow deleting this message."
+        let name = |sender| self.sender_name(sender).expect("TDLib sends a user or chat before referring to it");
+        let (question, choices) = match confirm {
+            Confirm::Delete { options: Some(DeleteOptions { for_me: false, for_everyone: false }), .. } => {
+                (sanitize("Telegram does not allow deleting this message."), Vec::new())
             }
-            _ => "Delete this message?",
+            Confirm::Delete { options, .. } => (
+                sanitize("Delete this message?"),
+                [
+                    (
+                        options.is_some_and(|o| o.for_everyone),
+                        choice("delete-for-everyone", "Delete for everyone", true),
+                    ),
+                    (options.is_some_and(|o| o.for_me), choice("delete-for-me", "Delete for me", false)),
+                ]
+                .into_iter()
+                .filter_map(|(allowed, button)| allowed.then_some(button))
+                .collect(),
+            ),
+            Confirm::Ban { chat_id, user_id } => {
+                let question = SafeText::concat(&[
+                    &sanitize("Delete all messages from "),
+                    name(Sender::User(user_id)),
+                    &sanitize(" in "),
+                    name(Sender::Chat(chat_id)),
+                    &sanitize(" and ban them from it?"),
+                ]);
+                (question, vec![choice("confirm-ban", "Delete all and ban", true)])
+            }
+            Confirm::Leave { chat_id } => {
+                let question = SafeText::concat(&[&sanitize("Leave "), name(Sender::Chat(chat_id)), &sanitize("?")]);
+                (question, vec![choice("confirm-leave", "Leave group", true)])
+            }
         };
         let dialog = v_flex()
-            .id("delete-message")
-            .w(px(DELETE_WIDTH))
+            .id("confirm")
+            .w(px(CONFIRM_WIDTH))
             .p_4()
             .gap_3()
             .bg(cx.theme().background)
@@ -1402,27 +1490,18 @@ impl Plaingram {
             .track_focus(&self.overlay_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    this.close_delete(window, cx);
+                    this.close_confirm(window, cx);
                 }
             }))
-            .child(question)
+            .child(safe_text(&question, cx))
             .child(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
-                    .when(options.is_some_and(|o| o.for_everyone), |el| {
-                        el.child(choice("delete-for-everyone", "Delete for everyone", true))
-                    })
-                    .when(options.is_some_and(|o| o.for_me), |el| {
-                        el.child(choice("delete-for-me", "Delete for me", false))
-                    })
-                    .child(
-                        Button::new("cancel-delete")
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| this.close_delete(window, cx))),
-                    ),
+                h_flex().gap_2().justify_end().children(choices).child(
+                    Button::new("cancel-confirm")
+                        .label("Cancel")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(window, cx))),
+                ),
             );
-        modal(dialog, Self::close_delete, cx)
+        modal(dialog, Self::close_confirm, cx)
     }
 
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
@@ -1535,10 +1614,16 @@ impl Render for Plaingram {
                     .relative()
                     .child(body)
                     .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx)))
-                    .when_some(self.deleting.as_ref(), |el, deleting| el.child(self.render_delete(deleting, cx)))
+                    .when_some(self.confirming, |el, confirm| el.child(self.render_confirm(confirm, cx)))
                     .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
     }
+}
+
+/// A menu item that asks to confirm `confirm`.
+fn ask_item(app: &Entity<Plaingram>, label: &'static str, confirm: Confirm) -> PopupMenuItem {
+    let app = app.clone();
+    PopupMenuItem::new(label).on_click(move |_, window, cx| app.update(cx, |this, cx| this.ask(confirm, window, cx)))
 }
 
 /// Dims the window under `content`, which sits near its top; a click outside calls `close`.
