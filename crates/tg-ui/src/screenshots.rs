@@ -533,3 +533,16 @@ fn messages_are_read_only_once_seen() {
     assert_eq!(unread(&mut cx, ALICE), 0);
     assert_eq!(unread(&mut cx, GROUP_CHAT), 3, "other chats stay unread");
 }
+
+/// After logging out, a sign-in that completes while the QR code shows, as when the phone scans it, opens the chats.
+#[test]
+fn signing_in_again_after_logging_out_opens_the_chats() {
+    let mut cx = headless();
+    let (_, app) = open_demo(&mut cx, true);
+    cx.update(|cx| app.read(cx).client.log_out());
+    cx.run_until_parked();
+    assert!(matches!(cx.update(|cx| app.read(cx).auth.clone()), Some(AuthStep::Qr { .. })));
+    cx.update(|cx| app.read(cx).client.submit_password(String::new()));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| app.read(cx).auth.clone()), Some(AuthStep::Ready));
+}

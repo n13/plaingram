@@ -65,7 +65,7 @@ const API_SETUP_STEPS: [&str; 4] = [
 ];
 
 pub struct Plaingram {
-    client: Rc<dyn Backend>,
+    pub(crate) client: Rc<dyn Backend>,
     /// Kept to rebuild this view from scratch when TDLib closes.
     events: Events,
     pub(crate) auth: Option<AuthStep>,
@@ -191,8 +191,8 @@ impl Plaingram {
         let receiver = events.clone();
         let events_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
-                if this.update_in(cx, |app, window, cx| app.apply(event, window, cx)).is_err() {
-                    return;
+                if let Err(error) = this.update_in(cx, |app, window, cx| app.apply(event, window, cx)) {
+                    return tracing::error!("stopped showing TDLib events: {error:#}");
                 }
             }
         });

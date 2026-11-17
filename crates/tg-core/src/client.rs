@@ -482,6 +482,7 @@ impl Client {
     }
 
     fn on_auth(&self, state: AuthorizationState) -> Result<()> {
+        tracing::info!("TDLib client {}: {}", self.id(), policy::variant_name(&state));
         let step = match state {
             AuthorizationState::WaitTdlibParameters => match ApiCredentials::load()? {
                 Some(credentials) => {
