@@ -5,6 +5,7 @@ Unofficial, super minimal Telegram client for Mac/Linux; Security first.
 Design goals:
 - Text and images, groups, and folders work
 - Cmd-K (Ctrl-K on Linux) jumps to any chat: names that start with what you type come first, then names that contain it, each in the order you last opened them
+- Starts in the chat you had open, Cmd-H hides and Cmd-Q quits
 - Reduce attack surface by removing mini apps, bots, animations, etc
 - Prevent impersonation and scammers by flagging all suspicious names, e.g. mixed alphabet and weird unicode characters
 

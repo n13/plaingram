@@ -476,3 +476,11 @@ fn right_clicking_a_message_deletes_it() {
     assert!(!deleting(&mut cx));
     assert!(last(&mut cx) != doomed, "Delete for everyone removes it from the chat");
 }
+
+/// The chat opened last, the one on screen at quit, opens again at start.
+#[test]
+fn the_last_opened_chat_opens_at_start() {
+    let mut cx = headless();
+    let (_, app) = open_demo(&mut cx, true);
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(FORUM));
+}

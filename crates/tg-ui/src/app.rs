@@ -332,6 +332,10 @@ impl Plaingram {
                 window.push_notification(note, cx);
             }
             Event::RecentChats(chats) => {
+                if let (None, Some(&last)) = (self.open_chat, chats.first()) {
+                    self.open(last, cx);
+                    self.focus_compose(window, cx);
+                }
                 for chat_id in chats {
                     if !self.recent.contains(&chat_id) {
                         self.recent.push(chat_id);

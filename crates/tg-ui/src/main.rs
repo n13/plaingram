@@ -36,6 +36,7 @@ fn main() -> Result<()> {
 
 fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
     theme::init(cx)?;
+    app_menu(cx);
     cx.on_window_closed(|cx, _| cx.quit()).detach();
     let window = TitleBar::window_options();
     let options = WindowOptions {
@@ -45,6 +46,20 @@ fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| app::Plaingram::new(backend, events, window, cx)))?;
     Ok(())
+}
+
+actions!(plaingram, [Quit, Hide]);
+
+/// The app menu with the shortcuts Mac users expect: Cmd-H hides plaingram, Cmd-Q (Ctrl-Q on Linux) quits it.
+fn app_menu(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-h", Hide, None)]);
+    let items =
+        vec![MenuItem::action("Hide plaingram", Hide), MenuItem::separator(), MenuItem::action("Quit plaingram", Quit)];
+    cx.set_menus([Menu { name: "plaingram".into(), items, disabled: false }]);
 }
 
 #[cfg(not(feature = "demo"))]
