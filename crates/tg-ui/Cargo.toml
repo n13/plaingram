@@ -15,6 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui-kit = "0.9"
 image = { version = "0.25", default-features = false }
 qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tg-core = { path = "../tg-core" }
 tracing = "0.1.44"

@@ -1,17 +1,23 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gpui_kit::base::Root;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    AppContext as _, Entity, ExternalPaths, FileDropEvent, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
+    AppContext as _, Context, Entity, ExternalPaths, FileDropEvent, FontFeatures, HeadlessAppContext, IntoElement,
+    KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, PlatformInput,
+    Render, Styled as _, Window, WindowHandle, black, div, point, px, size, white,
 };
 use tg_core::{AuthStep, Demo, Event, SafeContent, SafeReaction, Sender, sanitize};
 
 use crate::app::{Overlay, Plaingram, Viewer};
+use crate::theme::{Palette, THEMES};
 
 const SCREENSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/screenshots");
+const SETTINGS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-settings");
 const GROUP_CHAT: i64 = 11;
 const FORUM: i64 = 15;
 const ANNOUNCEMENTS_TOPIC: usize = 1;
@@ -87,16 +93,24 @@ fn headless() -> HeadlessAppContext {
         Arc::new(gpui_kit::assets::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(crate::theme::init).unwrap();
+    cx.update(gpui_kit::init);
     cx
 }
 
 fn open_demo(cx: &mut HeadlessAppContext, signed_in: bool) -> (WindowHandle<Root>, Entity<Plaingram>) {
+    open_app(cx, signed_in, settings_file())
+}
+
+fn open_app(
+    cx: &mut HeadlessAppContext,
+    signed_in: bool,
+    settings: PathBuf,
+) -> (WindowHandle<Root>, Entity<Plaingram>) {
     let (demo, events) = Demo::start(signed_in);
     let mut app = None;
     let window = cx
         .open_window(size(px(1100.), px(720.)), |window, cx| {
-            let view = cx.new(|cx| Plaingram::new(Rc::new(demo), events, window, cx));
+            let view = cx.new(|cx| Plaingram::new(Rc::new(demo), events, settings, window, cx));
             app = Some(view.clone());
             cx.new(|cx| Root::new(view, window, cx))
         })
@@ -357,16 +371,16 @@ fn logging_out_from_settings_returns_to_the_qr_code() {
     draw(&mut cx, window);
     click(&mut cx, window, 1078., 16.);
     screenshot(&mut cx, window, "settings");
-    click(&mut cx, window, 385., 298.);
+    click(&mut cx, window, 385., 566.);
     screenshot(&mut cx, window, "settings-log-out");
-    click(&mut cx, window, 458., 372.);
+    click(&mut cx, window, 458., 640.);
     let overlay = |cx: &mut HeadlessAppContext, confirm: bool| {
         cx.update(|cx| matches!(app.read(cx).overlay, Some(Overlay::Settings { confirm_log_out }) if confirm_log_out == confirm))
     };
     assert!(overlay(&mut cx, false), "Cancel keeps the account");
-    click(&mut cx, window, 385., 298.);
+    click(&mut cx, window, 385., 566.);
     assert!(overlay(&mut cx, true));
-    click(&mut cx, window, 384., 372.);
+    click(&mut cx, window, 384., 640.);
     cx.update(|cx| {
         let app = app.read(cx);
         assert!(matches!(app.auth, Some(AuthStep::Qr { .. })), "a fresh sign-in starts at the QR code");
@@ -528,10 +542,10 @@ fn settings_turn_the_fps_counter_on_and_off() {
     click(&mut cx, window, 1078., 16.);
     let shown = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).fps.is_some());
     assert!(!shown(&mut cx), "off by default");
-    click(&mut cx, window, 367., 264.);
+    click(&mut cx, window, 367., 531.);
     assert!(shown(&mut cx));
     screenshot(&mut cx, window, "settings-fps");
-    click(&mut cx, window, 367., 264.);
+    click(&mut cx, window, 367., 531.);
     assert!(!shown(&mut cx));
 }
 
@@ -647,4 +661,82 @@ fn reactions_show_under_messages_and_follow_updates() {
     assert_eq!(counts(&mut cx), [3, 2], "another chat's message with the same id is not this one");
     update(&mut cx, GROUP_CHAT, 4);
     assert_eq!(counts(&mut cx), [4]);
+}
+
+/// A settings file of its own for each app a test opens, none there yet.
+fn settings_file() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let path = PathBuf::from(SETTINGS_DIR).join(format!(
+        "{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    _ = std::fs::remove_file(&path);
+    path
+}
+
+/// The theme and CRT scanlines are picked in Settings, apply at once, and come back the next time plaingram opens.
+#[test]
+fn themes_are_picked_in_settings_and_kept_between_runs() {
+    const ORANGE_GLOW: (f32, f32) = (357., 343.);
+    const SCANLINES: (f32, f32) = (367., 501.);
+    let mut cx = headless();
+    let settings = settings_file();
+    let (window, app) = open_app(&mut cx, true, settings.clone());
+    draw(&mut cx, window);
+    click(&mut cx, window, 1078., 16.);
+    click(&mut cx, window, ORANGE_GLOW.0, ORANGE_GLOW.1);
+    click(&mut cx, window, SCANLINES.0, SCANLINES.1);
+    let picked = |cx: &mut HeadlessAppContext, app: &Entity<Plaingram>| {
+        cx.update(|cx| (app.read(cx).theme.name, app.read(cx).scanlines, cx.theme().foreground.to_rgb().g))
+    };
+    let amber = 0xb0 as f32 / 255.;
+    let (name, scanlines, green) = picked(&mut cx, &app);
+    assert!((name, scanlines) == ("Orange glow", true) && (green - amber).abs() < 0.01, "applies at once");
+    screenshot(&mut cx, window, "settings-orange-glow");
+
+    let (_, reopened) = open_app(&mut cx, true, settings);
+    let (name, scanlines, _) = picked(&mut cx, &reopened);
+    assert_eq!((name, scanlines), ("Orange glow", true), "comes back");
+}
+
+/// Every theme on the hiking group, with marked characters, warnings, reactions and both kinds of bubble.
+#[test]
+fn every_theme_draws_the_chat() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    for theme in &THEMES {
+        cx.update(|cx| app.update(cx, |app, cx| app.set_theme(theme, cx)));
+        draw(&mut cx, window);
+        scroll_to(&mut cx, &app, 5);
+        cx.run_until_parked();
+        screenshot(&mut cx, window, &format!("theme-{}", theme.name.to_lowercase().replace(' ', "-")));
+    }
+}
+
+/// San Francisco's high legibility set reaches the text: with it, `Il1 0O` draws differently.
+#[test]
+fn modern_retro_draws_high_legibility_letters() {
+    struct Sample(FontFeatures);
+    impl Render for Sample {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(white())
+                .text_color(black())
+                .text_size(px(40.))
+                .font_family(".SystemUIFont")
+                .font_features(self.0.clone())
+                .child("Il1 0O")
+        }
+    }
+    let mut cx = headless();
+    let mut pixels = |features: FontFeatures| {
+        let window = cx.open_window(size(px(300.), px(80.)), |_, cx| cx.new(|_| Sample(features))).unwrap();
+        cx.update_window(window.into(), |_, window, cx| _ = window.draw(cx)).unwrap();
+        cx.capture_screenshot(window.into()).unwrap().into_raw()
+    };
+    let plain = pixels(THEMES[0].font_features());
+    assert_ne!(plain, pixels(Palette::named("Modern retro").unwrap().font_features()));
 }

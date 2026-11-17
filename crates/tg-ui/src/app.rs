@@ -18,6 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, IconName, WindowExt as _, h_flex, v_flex};
@@ -30,6 +31,8 @@ use tg_core::{
 };
 
 use crate::safe_text::{name_label, name_warnings, safe_text, warning};
+use crate::settings::Settings;
+use crate::theme::{Palette, THEMES};
 
 const SIDEBAR_WIDTH: f32 = 300.;
 const CHAT_ROW_HEIGHT: f32 = 56.;
@@ -54,6 +57,14 @@ const SWITCHER_WIDTH: f32 = 480.;
 /// How far below the title bar a dialog sits.
 const MODAL_TOP: f32 = 60.;
 const CONFIRM_WIDTH: f32 = 440.;
+/// How strong and wide the halo around message bubbles is in themes that glow.
+const GLOW_ALPHA: f32 = 0.35;
+const GLOW_BLUR: f32 = 12.;
+/// How far the darkening at the edges reaches in themes that glow, and how dark it starts.
+const VIGNETTE_DEPTH: f32 = 160.;
+const VIGNETTE_ALPHA: f32 = 0.5;
+const SCANLINE_PITCH: f32 = 3.;
+const SCANLINE_ALPHA: f32 = 0.18;
 const SWITCHER_LIST_HEIGHT: f32 = 420.;
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
@@ -125,6 +136,10 @@ pub struct Plaingram {
     error: Option<SafeText>,
     /// When each frame of the last second was drawn, while Settings shows FPS in the title bar.
     pub(crate) fps: Option<VecDeque<Instant>>,
+    pub(crate) theme: &'static Palette,
+    /// Dark lines over the window, like a CRT's.
+    pub(crate) scanlines: bool,
+    settings_file: PathBuf,
     _subscriptions: [Subscription; 5],
     _tasks: [Task<()>; 2],
 }
@@ -174,7 +189,23 @@ enum Older {
 }
 
 impl Plaingram {
-    pub fn new(client: Rc<dyn Backend>, events: Events, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: Rc<dyn Backend>,
+        events: Events,
+        settings_file: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut errors = Vec::new();
+        let settings = Settings::load(&settings_file).unwrap_or_else(|error| {
+            errors.push(format!("{error:#}"));
+            Settings::default()
+        });
+        let theme = Palette::named(&settings.theme).unwrap_or_else(|| {
+            errors.push(format!("there is no theme called {}", settings.theme));
+            &THEMES[0]
+        });
+        theme.apply(cx);
         let login = cx.new(|cx| InputState::new(window, cx));
         let api_hash = cx.new(|cx| InputState::new(window, cx).placeholder("API hash").masked(true));
         let compose = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
@@ -226,7 +257,7 @@ impl Plaingram {
                 }
             }
         });
-        Self {
+        let mut this = Self {
             client,
             events,
             auth: None,
@@ -267,9 +298,29 @@ impl Plaingram {
             visible_rows: Rc::default(),
             scroll_samples: VecDeque::new(),
             error: None,
-            fps: None,
+            fps: settings.show_fps.then(VecDeque::new),
+            theme,
+            scanlines: settings.scanlines,
+            settings_file,
             _subscriptions: subscriptions,
             _tasks: [events_task, clock],
+        };
+        errors.iter().for_each(|error| this.show_error(error));
+        this
+    }
+
+    pub(crate) fn set_theme(&mut self, theme: &'static Palette, cx: &mut Context<Self>) {
+        self.theme = theme;
+        theme.apply(cx);
+        self.save_settings();
+        cx.notify();
+    }
+
+    fn save_settings(&mut self) {
+        let settings =
+            Settings { theme: self.theme.name.into(), show_fps: self.fps.is_some(), scanlines: self.scanlines };
+        if let Err(error) = settings.save(&self.settings_file) {
+            self.show_error(&format!("{error:#}"));
         }
     }
 
@@ -423,7 +474,7 @@ impl Plaingram {
     fn set_auth(&mut self, step: AuthStep, window: &mut Window, cx: &mut Context<Self>) {
         let (placeholder, masked) = match &step {
             AuthStep::Closed => {
-                *self = Self::new(self.client.clone(), self.events.clone(), window, cx);
+                *self = Self::new(self.client.clone(), self.events.clone(), self.settings_file.clone(), window, cx);
                 return;
             }
             AuthStep::Qr { link } => {
@@ -1103,6 +1154,7 @@ impl Plaingram {
                     .p_2()
                     .gap_2()
                     .bg(bubble)
+                    .when(self.theme.glow, |el| el.shadow(vec![glow(cx.theme().primary)]))
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
                     .child(self.render_content(&message.content, Some((app, message.date)), cx))
                     .when(!message.reactions.is_empty(), |el| el.child(reactions(&message.reactions, cx)))
@@ -1394,9 +1446,25 @@ impl Plaingram {
                     muted,
                 ))
                 .child(fact("Version", env!("CARGO_PKG_VERSION").into(), muted))
+                .child(
+                    v_flex().gap_2().child("Theme").child(
+                        RadioGroup::vertical("theme")
+                            .selected_index(THEMES.iter().position(|theme| theme.name == self.theme.name))
+                            .children(THEMES.iter().map(|theme| theme.name))
+                            .on_click(cx.listener(|this, &ix: &usize, _, cx| this.set_theme(&THEMES[ix], cx))),
+                    ),
+                )
+                .child(Switch::new("scanlines").checked(self.scanlines).label("CRT scanlines").on_click(cx.listener(
+                    |this, &on: &bool, _, cx| {
+                        this.scanlines = on;
+                        this.save_settings();
+                        cx.notify();
+                    },
+                )))
                 .child(Switch::new("show-fps").checked(self.fps.is_some()).label("Show FPS in the title bar").on_click(
                     cx.listener(|this, &show: &bool, _, cx| {
                         this.fps = show.then(VecDeque::new);
+                        this.save_settings();
                         cx.notify();
                     }),
                 ))
@@ -1565,8 +1633,10 @@ impl Render for Plaingram {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
+            .relative()
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
+            .font_features(self.theme.font_features())
             .child(
                 TitleBar::new().child(div().text_sm().text_color(cx.theme().muted_foreground).child("plaingram")).when(
                     self.auth == Some(AuthStep::Ready),
@@ -1615,7 +1685,57 @@ impl Render for Plaingram {
                     .when_some(self.confirming, |el, confirm| el.child(self.render_confirm(confirm, cx)))
                     .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
+            .when(self.scanlines || self.theme.glow, |el| el.child(crt(self.scanlines, self.theme.glow)))
     }
+}
+
+/// A halo in `color`, like phosphor bleeding around a lit area.
+fn glow(color: Hsla) -> BoxShadow {
+    BoxShadow {
+        color: color.opacity(GLOW_ALPHA),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(GLOW_BLUR),
+        spread_radius: px(0.),
+        inset: false,
+    }
+}
+
+/// A CRT's look over the whole window, without catching the mouse: dark lines every [`SCANLINE_PITCH`] px, and for
+/// themes that glow, darkened edges.
+fn crt(scanlines: bool, vignette: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            if vignette {
+                let depth = px(VIGNETTE_DEPTH);
+                let edges = [
+                    (Bounds::new(bounds.origin, size(bounds.size.width, depth)), 180.),
+                    (Bounds::new(point(bounds.left(), bounds.bottom() - depth), size(bounds.size.width, depth)), 0.),
+                    (Bounds::new(bounds.origin, size(depth, bounds.size.height)), 90.),
+                    (Bounds::new(point(bounds.right() - depth, bounds.top()), size(depth, bounds.size.height)), 270.),
+                ];
+                for (edge, angle) in edges {
+                    let shade = linear_color_stop(black().opacity(VIGNETTE_ALPHA), 0.);
+                    window.paint_quad(fill(
+                        edge,
+                        linear_gradient(angle, shade, linear_color_stop(transparent_black(), 1.)),
+                    ));
+                }
+            }
+            if scanlines {
+                let mut y = bounds.top();
+                while y < bounds.bottom() {
+                    let line = Bounds::new(point(bounds.left(), y), size(bounds.size.width, px(1.)));
+                    window.paint_quad(fill(line, black().opacity(SCANLINE_ALPHA)));
+                    y += px(SCANLINE_PITCH);
+                }
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// A small rounded label, filled with the primary color or outlined.

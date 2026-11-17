@@ -18,6 +18,7 @@ const LOG_FILE: &str = ".local/state/plaingram/plaingram.log";
 const DOWNLOADS: &str = "Downloads";
 /// Photos re-encoded for upload, inside the data folder, until Telegram has them.
 const UPLOADS: &str = "uploads";
+const SETTINGS: &str = "settings.json";
 
 /// TDLib's encrypted database and downloaded files.
 pub(crate) fn data_dir() -> Result<PathBuf> {
@@ -35,6 +36,11 @@ pub(crate) fn upload_path(data_dir: &Path) -> Result<PathBuf> {
 
 pub fn log_file() -> Result<PathBuf> {
     home(LOG_FILE)
+}
+
+/// What Settings keeps between runs.
+pub fn settings_file() -> Result<PathBuf> {
+    Ok(data_dir()?.join(SETTINGS))
 }
 
 /// Writes `contents` to a new file in ~/Downloads and returns its path.

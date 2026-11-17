@@ -16,5 +16,5 @@ pub use model::{
     AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent,
     SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
-pub use paths::log_file;
+pub use paths::{log_file, settings_file};
 pub use text::{Reason, SafeText, Segment, borrowed_names, code_points, is_allowed, sanitize};

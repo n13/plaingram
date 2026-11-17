@@ -1,7 +1,10 @@
+#![recursion_limit = "256"]
+
 mod app;
 mod safe_text;
 #[cfg(all(test, target_os = "macos"))]
 mod screenshots;
+mod settings;
 mod theme;
 
 use std::fs::{self, OpenOptions};
@@ -35,7 +38,7 @@ fn main() -> Result<()> {
 }
 
 fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
-    theme::init(cx)?;
+    gpui_kit::init(cx);
     app_menu(cx);
     cx.on_window_closed(|cx, _| cx.quit()).detach();
     let window = TitleBar::window_options();
@@ -44,7 +47,10 @@ fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
         titlebar: window.titlebar.map(|titlebar| TitlebarOptions { title: Some("plaingram".into()), ..titlebar }),
         ..window
     };
-    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| app::Plaingram::new(backend, events, window, cx)))?;
+    let settings = tg_core::settings_file()?;
+    gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| app::Plaingram::new(backend, events, settings, window, cx))
+    })?;
     Ok(())
 }
 

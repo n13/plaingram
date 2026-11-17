@@ -353,7 +353,10 @@ mod tests {
         };
         let shown: Vec<_> =
             reactions(Some(&info)).into_iter().map(|r| (r.emoji.to_string(), r.count, r.chosen)).collect();
-        assert_eq!(shown, [("\u{2764}\u{FE0F}".into(), 5, true), (CUSTOM_EMOJI.into(), 2, false), (PAID.into(), 1, false)]);
+        assert_eq!(
+            shown,
+            [("\u{2764}\u{FE0F}".into(), 5, true), (CUSTOM_EMOJI.into(), 2, false), (PAID.into(), 1, false)]
+        );
         assert!(reactions(None).is_empty());
     }
 
