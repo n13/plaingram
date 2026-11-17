@@ -7273,7 +7273,7 @@ dependencies = [
 
 [[package]]
 name = "td"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "futures-channel",
  "serde",
@@ -7286,7 +7286,7 @@ dependencies = [
 
 [[package]]
 name = "td-gen"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "tdlib-rs-parser",
 ]
@@ -7332,7 +7332,7 @@ dependencies = [
 
 [[package]]
 name = "tg-core"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7350,7 +7350,7 @@ dependencies = [
 
 [[package]]
 name = "tg-ui"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
