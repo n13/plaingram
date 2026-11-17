@@ -16,10 +16,21 @@ const DATA_DIR: &str = ".local/share/plaingram";
 #[cfg(target_os = "linux")]
 const LOG_FILE: &str = ".local/state/plaingram/plaingram.log";
 const DOWNLOADS: &str = "Downloads";
+/// Photos re-encoded for upload, inside the data folder, until Telegram has them.
+const UPLOADS: &str = "uploads";
 
 /// TDLib's encrypted database and downloaded files.
 pub(crate) fn data_dir() -> Result<PathBuf> {
     home(DATA_DIR)
+}
+
+/// A new, unused path for a photo being prepared for upload.
+pub(crate) fn upload_path(data_dir: &Path) -> Result<PathBuf> {
+    let dir = data_dir.join(UPLOADS);
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let mut id = [0u8; 16];
+    getrandom::fill(&mut id)?;
+    Ok(dir.join(format!("{}.jpg", id.map(|b| format!("{b:02x}")).concat())))
 }
 
 pub fn log_file() -> Result<PathBuf> {

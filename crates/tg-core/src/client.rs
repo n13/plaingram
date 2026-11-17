@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -8,13 +8,13 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
-    AuthorizationState, ChatActionBar, ChatList, ChatPhotos, File, ForumTopics, InputMessageContent, Message,
-    MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
+    AuthorizationState, ChatActionBar, ChatList, ChatPhotos, File, ForumTopics, InputFile, InputMessageContent,
+    Message, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
 
-use crate::image::{decode_jpeg, encode_jpeg};
+use crate::image::{decode_jpeg, encode_jpeg, prepare_upload};
 use crate::model::{AuthStep, Backend, Event};
 use crate::paths;
 use crate::policy;
@@ -87,6 +87,8 @@ pub struct Client {
     data_dir: PathBuf,
     events: async_channel::Sender<Event>,
     allowed: Arc<Mutex<Allowed>>,
+    /// Re-encoded photos being sent, by the temporary id of their message, to delete once the send ends.
+    uploads: Arc<Mutex<HashMap<i64, PathBuf>>>,
 }
 
 impl Client {
@@ -94,7 +96,14 @@ impl Client {
         td::set_log_verbosity(1).map_err(td_error)?;
         let data_dir = paths::data_dir()?;
         let (events, receiver) = async_channel::unbounded();
-        let client = Self { id: Arc::default(), use_phone: Arc::default(), data_dir, events, allowed: Arc::default() };
+        let client = Self {
+            id: Arc::default(),
+            use_phone: Arc::default(),
+            data_dir,
+            events,
+            allowed: Arc::default(),
+            uploads: Arc::default(),
+        };
         client.start_tdlib();
         let worker = client.clone();
         thread::Builder::new().name("tdlib-updates".into()).spawn(move || worker.receive_loop())?;
@@ -201,15 +210,40 @@ impl Backend for Client {
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String) {
         let this = self.clone();
         self.spawn(async move {
-            this.ensure_allowed(chat_id)?;
-            ensure!(is_allowed(&text), "message contains characters outside the allowlist");
             let content = InputMessageContent::InputMessageText(types::InputMessageText {
-                text: types::FormattedText { text, entities: Vec::new() },
+                text: formatted(text)?,
                 link_preview_options: Some(types::LinkPreviewOptions { is_disabled: true, ..Default::default() }),
                 clear_draft: true,
             });
-            let topic = topic.map(|forum_topic_id| MessageTopic::Forum(types::MessageTopicForum { forum_topic_id }));
-            functions::send_message(chat_id, topic, None, None, content, this.id()).await.map_err(td_error)?;
+            this.send(chat_id, topic, content).await.map(drop)
+        });
+    }
+
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<PathBuf>, caption: String) {
+        let this = self.clone();
+        self.spawn(async move {
+            let mut caption = Some(formatted(caption)?).filter(|c| !c.text.is_empty());
+            for file in files {
+                let out = paths::upload_path(&this.data_dir)?;
+                let (path, local) = (out.clone(), out.to_str().context("upload path is not UTF-8")?.to_owned());
+                let (width, height) = tokio::task::spawn_blocking(move || prepare_upload(&file, &path)).await??;
+                let content = InputMessageContent::InputMessagePhoto(types::InputMessagePhoto {
+                    photo: types::InputPhoto {
+                        photo: InputFile::Local(types::InputFileLocal { path: local }),
+                        thumbnail: None,
+                        video: None,
+                        added_sticker_file_ids: Vec::new(),
+                        width: width.try_into()?,
+                        height: height.try_into()?,
+                    },
+                    caption: caption.take(),
+                    show_caption_above_media: false,
+                    self_destruct_type: None,
+                    has_spoiler: false,
+                });
+                let message = this.send(chat_id, topic, content).await?;
+                this.uploads.lock().expect("uploads lock poisoned").insert(message.id, out);
+            }
             Ok(())
         });
     }
@@ -382,13 +416,19 @@ impl Client {
                 self.emit(Event::Message(policy::message(&u.message)));
                 self.load_reply(&u.message);
             }
-            Update::MessageSendSucceeded(u) if self.is_allowed(u.message.chat_id) => {
-                self.emit(Event::MessageSent { old_id: u.old_message_id, message: policy::message(&u.message) });
+            Update::MessageSendSucceeded(u) => {
+                self.remove_upload(u.old_message_id)?;
+                if self.is_allowed(u.message.chat_id) {
+                    self.emit(Event::MessageSent { old_id: u.old_message_id, message: policy::message(&u.message) });
+                }
             }
             Update::File(u) if u.file.local.is_downloading_active => {
                 self.emit(Event::DownloadProgress { file_id: u.file.id, progress: policy::download_progress(&u.file) });
             }
-            Update::MessageSendFailed(u) => bail!("sending failed: {}", u.error.message),
+            Update::MessageSendFailed(u) => {
+                self.remove_upload(u.old_message_id)?;
+                bail!("sending failed: {}", u.error.message)
+            }
             _ => {}
         }
         Ok(())
@@ -532,6 +572,21 @@ impl Client {
         }
     }
 
+    async fn send(&self, chat_id: i64, topic: Option<i32>, content: InputMessageContent) -> Result<types::Message> {
+        self.ensure_allowed(chat_id)?;
+        let topic = topic.map(|forum_topic_id| MessageTopic::Forum(types::MessageTopicForum { forum_topic_id }));
+        let Message::Message(message) =
+            functions::send_message(chat_id, topic, None, None, content, self.id()).await.map_err(td_error)?;
+        Ok(message)
+    }
+
+    fn remove_upload(&self, message_id: i64) -> Result<()> {
+        if let Some(path) = self.uploads.lock().expect("uploads lock poisoned").remove(&message_id) {
+            std::fs::remove_file(&path).with_context(|| format!("cannot delete {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     fn allowed(&self) -> MutexGuard<'_, Allowed> {
         self.allowed.lock().expect("allowlist lock poisoned")
     }
@@ -594,6 +649,11 @@ fn keychain_read(name: &str) -> Result<Option<Vec<u8>>> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+fn formatted(text: String) -> Result<types::FormattedText> {
+    ensure!(is_allowed(&text), "message contains characters outside the allowlist");
+    Ok(types::FormattedText { text, entities: Vec::new() })
 }
 
 fn td_error(error: types::Error) -> anyhow::Error {

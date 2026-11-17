@@ -247,6 +247,8 @@ pub trait Backend {
     fn load_topics(&self, chat_id: i64);
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
+    /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);
     fn load_photo(&self, file_id: i32);
     /// Saves a photo to ~/Downloads as `name`, re-encoded so no byte from its sender reaches the disk.
     fn save_photo(&self, file_id: i32, name: String);

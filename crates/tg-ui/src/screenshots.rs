@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Entity, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
+    AppContext as _, Entity, ExternalPaths, FileDropEvent, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
 };
 use tg_core::{AuthStep, Demo, SafeContent};
 
@@ -337,5 +337,45 @@ fn logging_out_from_settings_returns_to_the_qr_code() {
         let app = app.read(cx);
         assert!(matches!(app.auth, Some(AuthStep::Qr { .. })), "a fresh sign-in starts at the QR code");
         assert!(app.messages.is_empty() && app.overlay.is_none(), "nothing of the old account stays on screen");
+    });
+}
+
+/// Dropping a photo on the chat attaches it with a preview; Send posts it with the typed text as its caption.
+#[test]
+fn dropped_photos_are_attached_and_sent_with_the_caption() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    let photo = std::env::temp_dir().join(format!("plaingram-attach-{}.png", std::process::id()));
+    image::RgbaImage::from_pixel(64, 48, image::Rgba([40, 160, 240, 255])).save(&photo).unwrap();
+    let drop = |cx: &mut HeadlessAppContext| {
+        let position = point(px(700.), px(300.));
+        cx.update_window(window.into(), |_, window, cx| {
+            let paths = ExternalPaths(vec![photo.clone()].into());
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    let attachments = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).attachments.clone());
+    drop(&mut cx);
+    assert_eq!(attachments(&mut cx), vec![photo.clone()]);
+    draw(&mut cx, window);
+    click(&mut cx, window, 390., 663.);
+    assert!(attachments(&mut cx).is_empty(), "x leaves the photo out");
+    drop(&mut cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        app.update(cx, |app, cx| app.compose.update(cx, |input, cx| input.set_value("Summit!", window, cx)))
+    })
+    .unwrap();
+    screenshot(&mut cx, window, "attach");
+    click(&mut cx, window, 1068., 698.);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(app.attachments.is_empty() && app.compose.read(cx).value().is_empty(), "Send clears the draft");
+        let sent = &app.messages.last().unwrap().content;
+        assert!(matches!(sent, SafeContent::Photo { caption, .. } if caption.to_string() == "Summit!"), "{sent:?}");
     });
 }

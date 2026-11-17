@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +44,8 @@ const QR_STEPS: [&str; 3] =
     ["1. Open Telegram on your phone", "2. Go to Settings > Devices > Add Device", "3. Scan this image to log in"];
 /// Logical pixels; the code is drawn with 2 image pixels per point for Retina screens.
 const QR_SIZE: f32 = 240.;
+/// Logical pixels of an attached photo's preview.
+const ATTACHMENT_SIZE: f32 = 96.;
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
 const API_SETUP_STEPS: [&str; 4] = [
@@ -63,7 +66,7 @@ pub struct Plaingram {
     account: Option<(i64, SafeText)>,
     login: Entity<InputState>,
     api_hash: Entity<InputState>,
-    compose: Entity<InputState>,
+    pub(crate) compose: Entity<InputState>,
     pub(crate) scroller: Entity<MessageScrollerState>,
     users: HashMap<i64, SafeUser>,
     chats: HashMap<i64, SafeChat>,
@@ -84,6 +87,8 @@ pub struct Plaingram {
     /// How far each photo or file being downloaded has come, from 0 to 1.
     pub(crate) download_progress: HashMap<i32, f32>,
     pub(crate) overlay: Option<Overlay>,
+    /// Photos picked or dropped for the next message.
+    pub(crate) attachments: Vec<PathBuf>,
     overlay_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
@@ -189,6 +194,7 @@ impl Plaingram {
             requested_photos: HashSet::new(),
             download_progress: HashMap::new(),
             overlay: None,
+            attachments: Vec::new(),
             overlay_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
@@ -349,7 +355,7 @@ impl Plaingram {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat_id) = self.open_chat else { return };
         let text = self.compose.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         if !is_allowed(&text) {
@@ -357,12 +363,17 @@ impl Plaingram {
             cx.notify();
             return;
         }
-        self.client.send_text(chat_id, self.topic, text);
+        match self.attachments.is_empty() {
+            true => self.client.send_text(chat_id, self.topic, text),
+            false => self.client.send_photos(chat_id, self.topic, std::mem::take(&mut self.attachments), text),
+        }
         self.compose.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
     }
 
     pub(crate) fn open(&mut self, chat_id: i64, cx: &mut Context<Self>) {
         self.open_chat = Some(chat_id);
+        self.attachments.clear();
         self.topics.clear();
         self.clear_history(None, cx);
         if self.chats.get(&chat_id).is_some_and(|chat| chat.kind == ChatKind::Forum) {
@@ -459,6 +470,25 @@ impl Plaingram {
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
         self.overlay = None;
         cx.notify();
+    }
+
+    pub(crate) fn attach(&mut self, files: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        self.attachments.extend(files);
+        cx.notify();
+    }
+
+    fn pick_photos(&mut self, cx: &mut Context<Self>) {
+        let options =
+            PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) };
+        let picked = cx.prompt_for_paths(options);
+        cx.spawn(async move |this, cx| {
+            let picked = picked.await.map_err(anyhow::Error::from).and_then(|picked| picked);
+            this.update(cx, |this, cx| match picked {
+                Ok(files) => this.attach(files.into_iter().flatten(), cx),
+                Err(error) => this.show_error(&format!("cannot pick photos: {error:#}")),
+            })
+        })
+        .detach();
     }
 
     fn save_file(&mut self, file_id: i32, name: String, cx: &mut Context<Self>) {
@@ -623,6 +653,10 @@ impl Plaingram {
             .flex_1()
             .min_w_0()
             .h_full()
+            .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().secondary))
+            .on_drop(
+                cx.listener(|this, dropped: &ExternalPaths, _, cx| this.attach(dropped.paths().iter().cloned(), cx)),
+            )
             .child({
                 let header = h_flex().id("chat-header").p_3().border_b_1().border_color(cx.theme().border);
                 let header = match chat.kind {
@@ -665,12 +699,18 @@ impl Plaingram {
                 .with_jump_button_renderer(|button| button.label("Latest"))
                 .flex_1(),
             )
+            .when(!self.attachments.is_empty(), |el| el.child(self.render_attachments(cx)))
             .child(
                 h_flex()
                     .p_2()
                     .gap_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .child(
+                        Button::new("attach")
+                            .label("Photo")
+                            .on_click(cx.listener(|this, _, _, cx| this.pick_photos(cx))),
+                    )
                     .child(Input::new(&self.compose).flex_1())
                     .child(
                         Button::new("send")
@@ -680,6 +720,33 @@ impl Plaingram {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Previews of the photos going with the next message, each with 'x' to leave it out.
+    fn render_attachments(&self, cx: &mut Context<Self>) -> Div {
+        h_flex().px_2().pt_2().gap_2().border_t_1().border_color(cx.theme().border).children(
+            self.attachments.iter().enumerate().map(|(ix, file)| {
+                let name = sanitize(&file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+                v_flex()
+                    .w(px(ATTACHMENT_SIZE))
+                    .gap_1()
+                    .text_xs()
+                    .child(
+                        img(file.clone())
+                            .size(px(ATTACHMENT_SIZE))
+                            .object_fit(ObjectFit::Contain)
+                            .with_fallback(|| div().child("no preview").into_any_element()),
+                    )
+                    .child(h_flex().child(div().flex_1().min_w_0().truncate().child(safe_text(&name, cx))).child(
+                        Button::new(("remove-attachment", ix)).ghost().label("x").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.attachments.remove(ix);
+                                cx.notify();
+                            },
+                        )),
+                    ))
+            }),
+        )
     }
 
     fn render_message(&self, ix: usize, app: &Entity<Self>, cx: &App) -> AnyElement {

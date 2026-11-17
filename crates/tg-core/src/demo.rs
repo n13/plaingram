@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::client::Events;
@@ -201,6 +202,15 @@ impl Backend for Demo {
             self.emit(Event::Message(message(chat_id, topic, 1000, ME, SafeContent::Text(sanitize(&text)), now())))
         } else {
             self.emit(Event::Error(sanitize("message contains characters outside the allowlist")))
+        }
+    }
+
+    /// Shows each file as the demo photo, without reading it.
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<PathBuf>, caption: String) {
+        let mut caption = Some(sanitize(&caption));
+        for id in (1001..).take(files.len()) {
+            let content = SafeContent::Photo { photo: PHOTO, caption: caption.take().unwrap_or_default() };
+            self.emit(Event::Message(message(chat_id, topic, id, ME, content, now())));
         }
     }
 
