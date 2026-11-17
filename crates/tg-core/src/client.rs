@@ -161,10 +161,17 @@ impl Backend for Client {
             this.ensure_allowed(chat_id)?;
             functions::open_chat(chat_id, this.id()).await.map_err(td_error)?;
             let history = this.history(chat_id, topic, 0, HISTORY_SIZE).await?;
-            this.mark_read_now(chat_id, history.iter().map(|m| m.id).collect()).await?;
             this.emit(Event::History { chat_id, topic, messages: history.iter().map(policy::message).collect() });
             history.iter().for_each(|message| this.load_reply(message));
             Ok(())
+        });
+    }
+
+    fn close_chat(&self, chat_id: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            functions::close_chat(chat_id, this.id()).await.map_err(td_error)
         });
     }
 
@@ -229,7 +236,10 @@ impl Backend for Client {
 
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>) {
         let this = self.clone();
-        self.spawn(async move { this.mark_read_now(chat_id, message_ids).await });
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            functions::view_messages(chat_id, message_ids, None, true, this.id()).await.map_err(td_error)
+        });
     }
 
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String) {
@@ -341,11 +351,6 @@ impl Client {
         Ok(history)
     }
 
-    async fn mark_read_now(&self, chat_id: i64, message_ids: Vec<i64>) -> Result<()> {
-        self.ensure_allowed(chat_id)?;
-        functions::view_messages(chat_id, message_ids, None, true, self.id()).await.map_err(td_error)
-    }
-
     /// Emits what `message` replies to, if anything.
     fn load_reply(&self, message: &types::Message) {
         let Some(MessageReplyTo::Message(reply_to)) = message.reply_to.clone() else { return };
@@ -416,6 +421,9 @@ impl Client {
             }
             Update::ChatTitle(u) if self.is_allowed(u.chat_id) => {
                 self.emit(Event::ChatTitle { chat_id: u.chat_id, title: sanitize_name(&u.title) });
+            }
+            Update::ChatReadInbox(u) if self.is_allowed(u.chat_id) => {
+                self.emit(Event::ChatUnread { chat_id: u.chat_id, count: u.unread_count });
             }
             Update::ChatPosition(u) if self.is_allowed(u.chat_id) => {
                 self.emit_positions(u.chat_id, std::slice::from_ref(&u.position));

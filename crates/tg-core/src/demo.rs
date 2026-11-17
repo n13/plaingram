@@ -97,16 +97,16 @@ impl Demo {
             main_position: 0,
         });
         let (main, friends, groups) = (ChatListId::Main, ChatListId::Folder(1), ChatListId::Folder(2));
-        for (id, kind, title, order, lists) in [
-            (SAVED_MESSAGES, ChatKind::Private { user_id: ME }, "Sam Rivera", 7, vec![main]),
-            (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 6, vec![main, friends]),
-            (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 5, vec![main, friends, groups]),
-            (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 4, vec![main, friends]),
-            (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 3, vec![ChatListId::Archive]),
-            (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 2, vec![main, groups]),
-            (FORUM, ChatKind::Forum, "Rust devs", 1, vec![main, groups]),
+        for (id, kind, title, unread, order, lists) in [
+            (SAVED_MESSAGES, ChatKind::Private { user_id: ME }, "Sam Rivera", 0, 7, vec![main]),
+            (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 1, 6, vec![main, friends]),
+            (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 3, 5, vec![main, friends, groups]),
+            (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 0, 4, vec![main, friends]),
+            (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 1, 3, vec![ChatListId::Archive]),
+            (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 0, 2, vec![main, groups]),
+            (FORUM, ChatKind::Forum, "Rust devs", 128, 1, vec![main, groups]),
         ] {
-            self.emit(Event::Chat(SafeChat { id, kind, title: sanitize_name(title) }));
+            self.emit(Event::Chat(SafeChat { id, kind, title: sanitize_name(title), unread }));
             for list in lists {
                 self.emit(Event::ChatPosition { chat_id: id, list, order });
             }
@@ -167,6 +167,8 @@ impl Backend for Demo {
         }
     }
 
+    fn close_chat(&self, _: i64) {}
+
     fn load_profile(&self, user_id: i64) {
         let now = now();
         let (bio, photo_dates, groups_in_common, labels) = match user_id {
@@ -199,7 +201,10 @@ impl Backend for Demo {
         self.emit(Event::Topics { chat_id, topics });
     }
 
-    fn mark_read(&self, _: i64, _: Vec<i64>) {}
+    /// Reads the whole chat, as the demo's messages are all among the newest.
+    fn mark_read(&self, chat_id: i64, _: Vec<i64>) {
+        self.emit(Event::ChatUnread { chat_id, count: 0 });
+    }
 
     fn load_delete_options(&self, chat_id: i64, message_id: i64) {
         let options = DeleteOptions { for_me: true, for_everyone: true };

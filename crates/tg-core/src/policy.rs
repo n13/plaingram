@@ -15,7 +15,7 @@ const MAX_PHOTO_SIDE: i32 = 1280;
 /// `forums` holds the supergroup ids of forums.
 pub(crate) fn chat(chat: &types::Chat, bots: &HashSet<i64>, forums: &HashSet<i64>) -> Option<SafeChat> {
     let kind = chat_kind(&chat.r#type, bots, forums)?;
-    Some(SafeChat { id: chat.id, kind, title: sanitize_name(&chat.title) })
+    Some(SafeChat { id: chat.id, kind, title: sanitize_name(&chat.title), unread: chat.unread_count })
 }
 
 fn chat_kind(chat_type: &ChatType, bots: &HashSet<i64>, forums: &HashSet<i64>) -> Option<ChatKind> {

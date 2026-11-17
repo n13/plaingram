@@ -45,6 +45,8 @@ pub struct SafeChat {
     pub id: i64,
     pub kind: ChatKind,
     pub title: SafeText,
+    /// Incoming messages not read yet, as Telegram counts them.
+    pub unread: i32,
 }
 
 /// "All chats", the Archive, or one of the user's folders.
@@ -184,6 +186,10 @@ pub enum Event {
         chat_id: i64,
         title: SafeText,
     },
+    ChatUnread {
+        chat_id: i64,
+        count: i32,
+    },
     /// `order` 0 means the chat left the list.
     ChatPosition {
         chat_id: i64,
@@ -263,9 +269,12 @@ pub trait Backend {
     fn log_out(&self);
     /// Loads the history of a chat, or of one topic in a forum.
     fn open_chat(&self, chat_id: i64, topic: Option<i32>);
+    /// Tells TDLib the user left a chat [`Self::open_chat`] opened.
+    fn close_chat(&self, chat_id: i64);
     /// Loads messages older than message `before`, as an [`Event::OlderHistory`].
     fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64);
     fn load_topics(&self, chat_id: i64);
+    /// Tells Telegram the user saw these messages, which reads them and everything older.
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
     /// Emits [`Event::DeleteOptions`].
     fn load_delete_options(&self, chat_id: i64, message_id: i64);

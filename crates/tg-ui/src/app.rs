@@ -77,7 +77,7 @@ pub struct Plaingram {
     pub(crate) compose: Entity<InputState>,
     pub(crate) scroller: Entity<MessageScrollerState>,
     users: HashMap<i64, SafeUser>,
-    chats: HashMap<i64, SafeChat>,
+    pub(crate) chats: HashMap<i64, SafeChat>,
     positions: HashMap<ChatListId, HashMap<i64, i64>>,
     folders: Vec<(ChatListId, SharedString)>,
     folder_ix: usize,
@@ -90,6 +90,8 @@ pub struct Plaingram {
     topic: Option<i32>,
     pub(crate) messages: Vec<SafeMessage>,
     older: Older,
+    /// The newest incoming message of the open chat or topic already marked read.
+    viewed: i64,
     /// What each message in `messages` replies to, by message id.
     replies: HashMap<i64, SafeReply>,
     photos: HashMap<i32, Arc<RenderImage>>,
@@ -227,6 +229,7 @@ impl Plaingram {
             topic: None,
             messages: Vec::new(),
             older: Older::Available,
+            viewed: 0,
             replies: HashMap::new(),
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
@@ -256,6 +259,11 @@ impl Plaingram {
             Event::ChatTitle { chat_id, title } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.title = title;
+                }
+            }
+            Event::ChatUnread { chat_id, count } => {
+                if let Some(chat) = self.chats.get_mut(&chat_id) {
+                    chat.unread = count;
                 }
             }
             Event::ChatPosition { chat_id, list, order } => {
@@ -309,9 +317,6 @@ impl Plaingram {
                 self.replies.insert(message_id, reply);
             }
             Event::Message(message) if self.open_chat == Some(message.chat_id) && self.topic == message.topic => {
-                if !message.outgoing {
-                    self.client.mark_read(message.chat_id, vec![message.id]);
-                }
                 self.messages.push(message);
                 self.scroller.update(cx, |scroller, cx| _ = scroller.append(1, cx));
             }
@@ -440,6 +445,9 @@ impl Plaingram {
     }
 
     pub(crate) fn open(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        if let Some(left) = self.open_chat.filter(|&id| id != chat_id) {
+            self.client.close_chat(left);
+        }
         self.open_chat = Some(chat_id);
         self.recent.retain(|&id| id != chat_id);
         self.recent.insert(0, chat_id);
@@ -465,6 +473,7 @@ impl Plaingram {
         self.topic = topic;
         self.messages.clear();
         self.older = Older::Available;
+        self.viewed = 0;
         self.replies.clear();
         self.scroller.update(cx, |scroller, cx| scroller.reset(0, cx));
         cx.notify();
@@ -479,6 +488,26 @@ impl Plaingram {
         {
             self.older = Older::Loading;
             self.client.load_older(chat_id, self.topic, oldest.id);
+        }
+    }
+
+    /// Marks the incoming messages on screen read, but only while the window is in front and nothing covers the chat.
+    fn mark_read_in_view(&mut self, window: &Window) {
+        let (Some(chat_id), Some((first, last)), None, true) =
+            (self.open_chat, self.visible_rows.get(), &self.overlay, window.is_window_active())
+        else {
+            return;
+        };
+        let Some(visible) = self.messages.get(first..=last) else {
+            return tracing::error!(
+                "rows {first}..={last} are on screen, but there are {} messages",
+                self.messages.len()
+            );
+        };
+        let seen: Vec<_> = visible.iter().filter(|m| !m.outgoing && m.id > self.viewed).map(|m| m.id).collect();
+        if let Some(&newest) = seen.iter().max() {
+            self.viewed = newest;
+            self.client.mark_read(chat_id, seen);
         }
     }
 
@@ -782,17 +811,28 @@ impl Plaingram {
     fn render_chat_row(&self, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let chat = &self.chats[&self.chat_list[ix]];
         let id = chat.id;
-        v_flex()
+        h_flex()
             .id(ix)
             .w_full()
             .h(px(CHAT_ROW_HEIGHT))
             .px_3()
-            .justify_center()
+            .gap_2()
             .cursor_pointer()
             .when(self.open_chat == Some(id), |el| el.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id, cx)))
-            .child(chat_label(&self.chat_title(chat), self.chat_note(chat), cx))
+            .child(chat_label(&self.chat_title(chat), self.chat_note(chat), cx).flex_1().min_w_0())
+            .when(chat.unread > 0, |el| {
+                el.child(
+                    div()
+                        .px_2()
+                        .rounded_full()
+                        .text_xs()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .child(chat.unread.to_string()),
+                )
+            })
     }
 
     fn render_conversation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1342,7 +1382,10 @@ impl Render for Plaingram {
                 frames.pop_front();
             }
         }
-        cx.defer_in(window, |this, _, cx| this.load_photos_in_view(cx));
+        cx.defer_in(window, |this, window, cx| {
+            this.load_photos_in_view(cx);
+            this.mark_read_in_view(window);
+        });
         let body = match self.auth {
             Some(AuthStep::Ready) => h_flex()
                 .flex_1()

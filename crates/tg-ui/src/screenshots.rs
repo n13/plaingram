@@ -506,3 +506,19 @@ fn settings_turn_the_fps_counter_on_and_off() {
     click(&mut cx, window, 367., 264.);
     assert!(!shown(&mut cx));
 }
+
+/// A chat stays unread while plaingram is in the background; once the window is in front, what is on screen is read.
+#[test]
+fn messages_are_read_only_once_seen() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    let unread = |cx: &mut HeadlessAppContext, chat_id| cx.update(|cx| app.read(cx).chats[&chat_id].unread);
+    cx.update(|cx| app.update(cx, |app, cx| app.open(ALICE, cx)));
+    draw(&mut cx, window);
+    screenshot(&mut cx, window, "unread");
+    assert_eq!(unread(&mut cx, ALICE), 1, "plaingram is in the background");
+    cx.update_window(window.into(), |_, window, _| window.activate_window()).unwrap();
+    draw(&mut cx, window);
+    assert_eq!(unread(&mut cx, ALICE), 0);
+    assert_eq!(unread(&mut cx, GROUP_CHAT), 3, "other chats stay unread");
+}
