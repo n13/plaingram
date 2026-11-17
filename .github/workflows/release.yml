@@ -51,6 +51,10 @@ jobs:
           path: .tdlib/install
           key: ${{ steps.tdlib.outputs.cache-primary-key }}
 
+      - name: Check the tag matches the version
+        if: github.ref_type == 'tag'
+        run: test "$GITHUB_REF_NAME" = "v$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+
       - name: Test and build
         env:
           PLAINGRAM_API_ID: ${{ startsWith(github.ref, 'refs/tags/') && secrets.PLAINGRAM_API_ID || '' }}
