@@ -21,6 +21,7 @@ const ALICE: i64 = 10;
 const BOB: i64 = 12;
 const PAYPAL: i64 = 13;
 const FAMILY: i64 = 14;
+const SAVED_MESSAGES: i64 = 16;
 
 #[test]
 fn capture_demo_screens() {
@@ -383,6 +384,8 @@ fn dropped_photos_are_attached_and_sent_with_the_caption() {
         let sent = &app.messages.last().unwrap().content;
         assert!(matches!(sent, SafeContent::Photo { caption, .. } if caption.to_string() == "Summit!"), "{sent:?}");
     });
+    click(&mut cx, window, 318., 698.);
+    screenshot(&mut cx, window, "attach-menu");
 }
 
 /// Cmd-K lists the chats opened last first. Typing keeps names that start with the text, then names that contain it.
@@ -393,7 +396,7 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     let ranked = |cx: &mut HeadlessAppContext, query: &str| cx.update(|cx| app.read(cx).switcher_chats(query));
     assert_eq!(
         ranked(&mut cx, ""),
-        [FORUM, PAYPAL, ALICE, GROUP_CHAT, BOB, FAMILY],
+        [FORUM, PAYPAL, SAVED_MESSAGES, ALICE, GROUP_CHAT, BOB, FAMILY],
         "opened last, then Telegram's order"
     );
     assert_eq!(
@@ -401,7 +404,8 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
         [ALICE, PAYPAL],
         "Alice starts with it; P?ypal, though opened later, only contains it"
     );
-    assert_eq!(ranked(&mut cx, "e"), [FORUM, ALICE, GROUP_CHAT, BOB]);
+    assert_eq!(ranked(&mut cx, "e"), [FORUM, SAVED_MESSAGES, ALICE, GROUP_CHAT, BOB]);
+    assert_eq!(ranked(&mut cx, "saved"), [SAVED_MESSAGES], "the chat with yourself is Saved Messages, as in Telegram");
     assert!(ranked(&mut cx, "xyz").is_empty());
 
     let switcher_open = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).switcher.is_some());
@@ -436,9 +440,9 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     screenshot(&mut cx, window, "switcher-recent");
     click(&mut cx, window, 550., 245.);
     assert!(!switcher_open(&mut cx));
-    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(ALICE), "a click on the third chat opens it");
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(SAVED_MESSAGES), "a click on the third chat opens it");
     key(&mut cx, window, "cmd-k");
     click(&mut cx, window, 990., 550.);
     assert!(!switcher_open(&mut cx), "a click outside closes");
-    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(ALICE));
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(SAVED_MESSAGES));
 }

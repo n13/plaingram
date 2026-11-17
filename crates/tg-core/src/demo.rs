@@ -19,6 +19,7 @@ const TRAIL_FILE: i32 = 3000;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const PAYPAL: i64 = 13;
+const SAVED_MESSAGES: i64 = 16;
 const DEMO_SPACING: i32 = 5 * 3600;
 const GENERAL_TOPIC: i32 = 1;
 /// Messages in the forum's General topic, enough to scroll back through.
@@ -97,6 +98,7 @@ impl Demo {
         });
         let (main, friends, groups) = (ChatListId::Main, ChatListId::Folder(1), ChatListId::Folder(2));
         for (id, kind, title, order, lists) in [
+            (SAVED_MESSAGES, ChatKind::Private { user_id: ME }, "Sam Rivera", 7, vec![main]),
             (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 6, vec![main, friends]),
             (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 5, vec![main, friends, groups]),
             (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 4, vec![main, friends]),

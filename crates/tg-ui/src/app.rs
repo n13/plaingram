@@ -14,7 +14,7 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::TabBar;
@@ -534,7 +534,7 @@ impl Plaingram {
             .chats
             .values()
             .filter_map(|chat| {
-                let title = chat.title.to_string().to_lowercase();
+                let title = self.chat_title(chat).to_string().to_lowercase();
                 if !title.contains(&query) {
                     return None;
                 }
@@ -614,8 +614,21 @@ impl Plaingram {
         self.chat_list = chats.into_iter().map(|(_, id)| id).collect();
     }
 
+    /// Telegram titles the chat with yourself with your name; its apps call it Saved Messages.
+    fn chat_title(&self, chat: &SafeChat) -> SafeText {
+        match chat.kind {
+            ChatKind::Private { user_id } if self.is_me(user_id) => sanitize("Saved Messages"),
+            _ => chat.title.clone(),
+        }
+    }
+
+    fn is_me(&self, user_id: i64) -> bool {
+        self.account.as_ref().is_some_and(|(me, _)| *me == user_id)
+    }
+
     fn chat_note(&self, chat: &SafeChat) -> String {
         match chat.kind {
+            ChatKind::Private { user_id } if self.is_me(user_id) => "only you".to_string(),
             ChatKind::Group => "group".to_string(),
             ChatKind::Forum => "group with topics".to_string(),
             ChatKind::Private { user_id } => self.person_note(user_id),
@@ -713,7 +726,7 @@ impl Plaingram {
             .when(self.open_chat == Some(id), |el| el.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id, cx)))
-            .child(chat_label(&chat.title, self.chat_note(chat), cx))
+            .child(chat_label(&self.chat_title(chat), self.chat_note(chat), cx))
     }
 
     fn render_conversation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -743,7 +756,7 @@ impl Plaingram {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_profile(user_id, cx))),
                     ChatKind::Group | ChatKind::Forum => header,
                 };
-                header.child(name_label(&chat.title, cx))
+                header.child(name_label(&self.chat_title(chat), cx))
             })
             .when(!self.topics.is_empty(), |el| {
                 let selected = self.topics.iter().position(|t| Some(t.id) == self.topic).unwrap_or_default();
@@ -757,6 +770,7 @@ impl Plaingram {
             .child(
                 MessageScroller::new("messages", self.scroller.clone(), {
                     let visible_rows = self.visible_rows.clone();
+                    let app = app.clone();
                     move |ix, _, cx| {
                         let visible_rows = visible_rows.clone();
                         let on_screen = canvas(
@@ -784,11 +798,14 @@ impl Plaingram {
                     .gap_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        Button::new("attach")
-                            .label("Photo")
-                            .on_click(cx.listener(|this, _, _, cx| this.pick_photos(cx))),
-                    )
+                    .child(Button::new("attach").ghost().label("+").dropdown_menu_with_anchor(Anchor::BottomLeft, {
+                        move |menu, _, _| {
+                            let app = app.clone();
+                            menu.item(PopupMenuItem::new("Add image").on_click(move |_, _, cx| {
+                                app.update(cx, |this, cx| this.pick_photos(cx));
+                            }))
+                        }
+                    }))
                     .child(Input::new(&self.compose).flex_1())
                     .child(
                         Button::new("send")
@@ -1140,7 +1157,7 @@ impl Plaingram {
             .iter()
             .map(|id| {
                 let chat = &self.chats[id];
-                let (title, note) = (chat.title.clone(), self.chat_note(chat));
+                let (title, note) = (self.chat_title(chat), self.chat_note(chat));
                 CommandItem::new().child(move |_, cx| chat_label(&title, note.clone(), cx))
             })
             .collect();
