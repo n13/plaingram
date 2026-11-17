@@ -51,12 +51,13 @@ fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
 actions!(plaingram, [Quit, Hide]);
 
 /// The app menu with the shortcuts Mac users expect: Cmd-H hides plaingram, Cmd-Q (Ctrl-Q on Linux) quits it.
-fn app_menu(cx: &mut App) {
+pub(crate) fn app_menu(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
-    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-h", Hide, None)]);
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-h", Hide, None)]);
+    #[cfg(target_os = "linux")]
+    cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
     let items =
         vec![MenuItem::action("Hide plaingram", Hide), MenuItem::separator(), MenuItem::action("Quit plaingram", Quit)];
     cx.set_menus([Menu { name: "plaingram".into(), items, disabled: false }]);

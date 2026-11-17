@@ -484,3 +484,9 @@ fn the_last_opened_chat_opens_at_start() {
     let (_, app) = open_demo(&mut cx, true);
     assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(FORUM));
 }
+
+/// Key bindings are parsed when the app starts, so a bad one would crash it.
+#[test]
+fn the_app_menu_sets_up() {
+    headless().update(crate::app_menu);
+}
