@@ -3,7 +3,6 @@ use std::fmt;
 use std::ops::{Range, RangeInclusive};
 use std::sync::{LazyLock, Mutex};
 
-use unicode_security::skeleton;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::emoji;
@@ -55,42 +54,8 @@ const SYMBOLS: [char; 18] = [
     '\u{1F71B}',
 ];
 
-/// Names scammers on Telegram pose as most.
-const BORROWED_NAMES: [&str; 23] = [
-    "Telegram",
-    "Durov",
-    "Admin",
-    "Support",
-    "PayPal",
-    "Binance",
-    "Coinbase",
-    "Bybit",
-    "Kraken",
-    "MetaMask",
-    "Trust Wallet",
-    "Ledger",
-    "Trezor",
-    "Tether",
-    "Tonkeeper",
-    "Revolut",
-    "WhatsApp",
-    "Instagram",
-    "Facebook",
-    "Apple",
-    "Google",
-    "Microsoft",
-    "Amazon",
-];
-
 /// Lines already logged, so each is reported once.
 static REPORTED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
-
-/// The [`BORROWED_NAMES`] within `folded`, a name from [`SafeText::folded`].
-pub fn borrowed_names(folded: &str) -> impl Iterator<Item = &'static str> + '_ {
-    static FOLDED: LazyLock<Vec<(&str, String)>> =
-        LazyLock::new(|| BORROWED_NAMES.iter().map(|&name| (name, sanitize(name).folded())).collect());
-    FOLDED.iter().filter(move |(_, borrowed)| folded.contains(borrowed.as_str())).map(|&(name, _)| name)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reason {
@@ -100,16 +65,6 @@ pub enum Reason {
         letter: &'static str,
         first: &'static str,
     },
-    /// In a name, passes for `like` where it stands, such as the capital `I` in `AIma`; shown as `shown`, which does not.
-    LooksLike {
-        like: &'static str,
-        shown: &'static str,
-    },
-    /// In a name, a `letter` that looks just like a plain Latin letter or digit, such as Cyrillic `а`: marked in Latin
-    /// words, and in other words made only of such letters, which read as Latin.
-    Twin {
-        letter: &'static str,
-    },
 }
 
 impl fmt::Display for Reason {
@@ -117,8 +72,6 @@ impl fmt::Display for Reason {
         match self {
             Reason::NotAllowed => f.write_str("suspicious characters"),
             Reason::MixedAlphabets { letter, first } => write!(f, "{letter} in {first} text"),
-            Reason::LooksLike { like, .. } => write!(f, "looks like {like}"),
-            Reason::Twin { letter } => write!(f, "{letter} that looks like plain Latin"),
         }
     }
 }
@@ -127,7 +80,7 @@ impl fmt::Display for Reason {
 pub enum Segment {
     Text(String),
     Emoji(&'static str),
-    /// Shown as `?`, or marked as its [`Reason`] says; the raw grapheme is only listed in warnings.
+    /// Displayed as `?`; the raw grapheme is only shown in warnings.
     Replaced {
         grapheme: String,
         reason: Reason,
@@ -139,16 +92,7 @@ impl Segment {
         match self {
             Segment::Text(text) => text,
             Segment::Emoji(emoji) => emoji,
-            Segment::Replaced { reason: Reason::LooksLike { shown, .. }, .. } => shown,
-            Segment::Replaced { grapheme, reason: Reason::Twin { .. } } => grapheme,
             Segment::Replaced { .. } => "?",
-        }
-    }
-
-    fn raw(&self) -> &str {
-        match self {
-            Segment::Replaced { grapheme, .. } => grapheme,
-            segment => segment.as_str(),
         }
     }
 }
@@ -178,20 +122,12 @@ impl SafeText {
         self.0.is_empty()
     }
 
-    /// The texts one after another, each keeping its replaced and marked graphemes.
+    /// The texts one after another, each keeping its replaced graphemes.
     pub fn concat(parts: &[&SafeText]) -> SafeText {
         SafeText(parts.iter().flat_map(|part| part.0.iter().cloned()).collect())
     }
 
-    /// What the text looks like, for telling names that could be mistaken for each other: the Unicode (UTS 39)
-    /// skeleton of the original text, ignoring case, the dot on `i`, and everything but letters and digits.
-    pub fn folded(&self) -> String {
-        let raw: String = self.0.iter().map(Segment::raw).collect();
-        let look = |text: &str| skeleton(text).collect::<String>().to_lowercase().replace('i', "l");
-        look(&look(&raw)).chars().filter(|c| c.is_alphanumeric()).collect()
-    }
-
-    /// Byte ranges of the replaced and marked graphemes within the [`Display`](fmt::Display) output.
+    /// Byte ranges of the replacement `?`s within the [`Display`](fmt::Display) output.
     pub fn replaced_ranges(&self) -> Vec<Range<usize>> {
         let mut end = 0;
         self.0
@@ -224,18 +160,9 @@ pub fn sanitize(raw: &str) -> SafeText {
 }
 
 /// Like [`sanitize`] for names of people and chats, but the first letter decides the alphabet of the whole name,
-/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too, and what passes for something else where it
-/// stands is marked, as [`mark_lookalikes`] says.
+/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too.
 pub fn sanitize_name(raw: &str) -> SafeText {
-    let SafeText(segments) = sanitize_with(raw, false);
-    let mut marked = Vec::new();
-    for segment in segments {
-        match segment {
-            Segment::Text(text) => mark_lookalikes(&text, &mut marked),
-            segment => marked.push(segment),
-        }
-    }
-    SafeText(marked)
+    sanitize_with(raw, false)
 }
 
 fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
@@ -246,95 +173,13 @@ fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
         if per_word && is_space {
             first = None;
         }
-        match if is_space { None } else { special(grapheme, &mut first) } {
-            Some(segment) => segments.push(segment),
-            None => push_text(&mut segments, grapheme),
+        match (if is_space { None } else { special(grapheme, &mut first) }, segments.last_mut()) {
+            (Some(segment), _) => segments.push(segment),
+            (None, Some(Segment::Text(text))) => text.push_str(grapheme),
+            (None, _) => segments.push(Segment::Text(grapheme.into())),
         }
     }
     SafeText(segments)
-}
-
-fn push_text(segments: &mut Vec<Segment>, text: &str) {
-    match segments.last_mut() {
-        Some(Segment::Text(last)) => last.push_str(text),
-        _ => segments.push(Segment::Text(text.into())),
-    }
-}
-
-/// Marks a capital `I` after the start of a word with lowercase letters, a lowercase `l` starting a word or in one
-/// without lowercase letters, `0` and `1` beside letters and `O`, `I` and `l` beside digits, a `|` touching a word,
-/// `rn`, which reads as `m`, and [`Reason::Twin`] letters. Errs on the side of caution, so names such as `McIntyre`
-/// are marked too.
-fn mark_lookalikes(text: &str, segments: &mut Vec<Segment>) {
-    let chars: Vec<char> = text.chars().collect();
-    let mut marks = vec![None; chars.len()];
-    let mut start = 0;
-    for run in chars.chunk_by(|a, b| a.is_alphanumeric() == b.is_alphanumeric()) {
-        let end = start + run.len();
-        if run[0].is_alphanumeric() {
-            mark_word(run, &mut marks[start..end]);
-        }
-        for (ix, &c) in run.iter().enumerate() {
-            if c == '|' && ((ix == 0 && start > 0) || (ix + 1 == run.len() && end < chars.len())) {
-                marks[start + ix] = Some(Reason::LooksLike { like: "l", shown: "|" });
-            }
-        }
-        start = end;
-    }
-    let mut ix = 0;
-    while let Some(&c) = chars.get(ix) {
-        match marks[ix] {
-            Some(reason) => {
-                let len = match reason {
-                    Reason::LooksLike { shown, .. } => shown.len(),
-                    _ => 1,
-                };
-                segments.push(replace(&chars[ix..ix + len].iter().collect::<String>(), reason));
-                ix += len;
-            }
-            None => {
-                push_text(segments, c.encode_utf8(&mut [0; 4]));
-                ix += 1;
-            }
-        }
-    }
-}
-
-/// [`mark_lookalikes`] for one run of letters and digits.
-fn mark_word(word: &[char], marks: &mut [Option<Reason>]) {
-    let lowercase = word.iter().any(|&c| c.is_lowercase() && c != 'l');
-    let twins: Vec<_> = word.iter().map(|&c| twin(c)).collect();
-    let disguised = word.iter().zip(&twins).all(|(c, twin)| twin.is_some() || !c.is_alphabetic());
-    for (ix, &c) in word.iter().enumerate() {
-        if let Some(letter) = twins[ix].filter(|&letter| letter == "Latin" || disguised) {
-            marks[ix] = Some(Reason::Twin { letter });
-            continue;
-        }
-        let near: Vec<char> =
-            [ix.checked_sub(1), Some(ix + 1)].into_iter().flatten().filter_map(|n| word.get(n).copied()).collect();
-        let (letters, digits) = (near.iter().any(|c| c.is_alphabetic()), near.iter().any(char::is_ascii_digit));
-        let looks = match c {
-            '0' if letters && !digits => Some(("O", "0")),
-            '1' if letters && !digits => Some(("l", "1")),
-            'O' if digits && !letters => Some(("0", "o")),
-            'I' if digits && !letters => Some(("1", "i")),
-            'l' if digits && !letters => Some(("1", "L")),
-            'I' if ix > 0 && lowercase => Some(("l", "i")),
-            'l' if ix == 0 || !lowercase => Some(("I", "L")),
-            'r' if word.get(ix + 1) == Some(&'n') => Some(("m", "rn")),
-            _ => None,
-        };
-        if let Some((like, shown)) = looks {
-            marks[ix] = Some(Reason::LooksLike { like, shown });
-        }
-    }
-}
-
-/// The alphabet of `c` when it is a letter that Unicode lists as looking just like a plain Latin letter or digit.
-fn twin(c: char) -> Option<&'static str> {
-    let text = &c.to_string();
-    let letter = alphabet(text)?;
-    (!c.is_ascii() && skeleton(text).all(|t| t.is_ascii_alphanumeric())).then_some(letter)
 }
 
 /// `None` for plain text. `first` is the alphabet of the first letter of the current word or name.
@@ -432,93 +277,6 @@ mod tests {
         assert_eq!(sanitize_name("\u{0410}lice Smith").to_string(), "\u{0410}???? ?????");
         assert_eq!(sanitize_name("Андрей Смоляков \u{1F4A6}").to_string(), "Андрей Смоляков \u{1F4A6}");
         assert_eq!(Reason::MixedAlphabets { letter: "Greek", first: "Latin" }.to_string(), "Greek in Latin text");
-    }
-
-    fn looks(grapheme: &str, like: &'static str, shown: &'static str) -> Segment {
-        Replaced { grapheme: grapheme.into(), reason: Reason::LooksLike { like, shown } }
-    }
-
-    #[test]
-    fn bars_that_pass_for_another_letter_in_names_show_in_the_other_case() {
-        assert_eq!(sanitize_name("AIma").segments(), [text("A"), looks("I", "l", "i"), text("ma")]);
-        assert_eq!(sanitize_name("ADMlN").segments(), [text("ADM"), looks("l", "I", "L"), text("N")]);
-        assert_eq!(sanitize_name("lnstagram").segments(), [looks("l", "I", "L"), text("nstagram")]);
-        assert_eq!(sanitize_name("PayPaI paypaI").to_string(), "PayPai paypai");
-        assert_eq!(sanitize_name("McIntyre").to_string(), "Mcintyre", "caution over the odd real name");
-        assert_eq!(sanitize_name("Al").to_string(), "AL");
-        for name in ["Alma", "ALMA", "Ivan", "IKEA", "Bill", "BILL", "AI", "Henry II", "alice_smith"] {
-            assert_eq!(sanitize_name(name).segments(), [text(name)], "{name:?}");
-        }
-    }
-
-    #[test]
-    fn digits_among_letters_and_letters_among_digits_are_marked_in_names() {
-        assert_eq!(sanitize_name("B0b").segments(), [text("B"), looks("0", "O", "0"), text("b")]);
-        assert_eq!(sanitize_name("A1ice Pau1").to_string(), "A1ice Pau1");
-        assert_eq!(sanitize_name("A1ice Pau1").replaced_ranges(), [1..2, 9..10]);
-        assert_eq!(
-            sanitize_name("2O24 l23").segments(),
-            [text("2"), looks("O", "0", "o"), text("24 "), looks("l", "1", "L"), text("23")]
-        );
-        for name in ["Agent007", "john1990", "Win10", "Room 101"] {
-            assert_eq!(sanitize_name(name).segments(), [text(name)], "{name:?}");
-        }
-    }
-
-    #[test]
-    fn bars_touching_words_and_rn_are_marked_in_names() {
-        assert_eq!(sanitize_name("A|ma").segments(), [text("A"), looks("|", "l", "|"), text("ma")]);
-        assert_eq!(sanitize_name("Bob | Work").segments(), [text("Bob | Work")]);
-        assert_eq!(sanitize_name("rnike").segments(), [looks("rn", "m", "rn"), text("ike")]);
-        assert_eq!(sanitize_name("Bernard").segments(), [text("Be"), looks("rn", "m", "rn"), text("ard")]);
-    }
-
-    #[test]
-    fn words_of_letters_that_all_look_latin_are_marked_in_names() {
-        let twin = |grapheme: &str, letter| Replaced { grapheme: grapheme.into(), reason: Reason::Twin { letter } };
-        let app = "\u{0410}\u{0440}\u{0440}";
-        assert_eq!(
-            sanitize_name(app).segments(),
-            [twin("\u{0410}", "Cyrillic"), twin("\u{0440}", "Cyrillic"), twin("\u{0440}", "Cyrillic")]
-        );
-        assert_eq!(sanitize_name(app).to_string(), app, "shown, but marked");
-        assert_eq!(sanitize_name("\u{041C}\u{041E}\u{0421}\u{041A}\u{0412}\u{0410}").replaced().count(), 6);
-        assert_eq!(sanitize_name("Al\u{0131}ce").segments(), [text("Al"), twin("\u{0131}", "Latin"), text("ce")]);
-        assert_eq!(Reason::Twin { letter: "Cyrillic" }.to_string(), "Cyrillic that looks like plain Latin");
-        for name in ["Москва", "Андрей Смоляков", "Café Müller"] {
-            assert_eq!(sanitize_name(name).segments(), [text(name)], "{name:?}");
-        }
-    }
-
-    #[test]
-    fn messages_are_not_marked() {
-        assert_eq!(
-            sanitize("AIma B0b rnike lol \u{0410}\u{0440}\u{0440}").to_string(),
-            "AIma B0b rnike lol \u{0410}\u{0440}\u{0440}"
-        );
-    }
-
-    #[test]
-    fn folding_matches_names_that_look_alike() {
-        let folded = |name: &str| sanitize_name(name).folded();
-        assert_eq!(folded("Alice Smith"), folded("alice_smith_"));
-        assert_eq!(folded("a1ice.smith"), folded("AIice Smith"));
-        assert_eq!(folded("B0b Jones"), folded("bobjones"));
-        assert_eq!(folded("Mike"), folded("rnike"));
-        assert_eq!(folded("\u{0412}\u{041E}\u{0412}"), folded("Bob"), "Cyrillic ВОВ");
-        assert_eq!(folded("P\u{0430}ypal"), folded("Paypal"), "the replaced Cyrillic а still counts");
-        assert_ne!(folded("Alice Smith"), folded("Alice Smyth"));
-        assert_eq!(folded("\u{1F60A} ?!"), "");
-    }
-
-    #[test]
-    fn borrowed_names_are_found_however_they_are_disguised() {
-        let borrowed = |name: &str| borrowed_names(&sanitize_name(name).folded()).collect::<Vec<_>>();
-        assert_eq!(borrowed("PayPaI Support \u{1F4B0}"), ["Support", "PayPal"]);
-        assert_eq!(borrowed("\u{0420}\u{0430}\u{0443}\u{0420}\u{0430}\u{04CF}"), ["PayPal"], "Cyrillic РауРаӏ");
-        assert_eq!(borrowed("trust_wa11et"), ["Trust Wallet"]);
-        assert_eq!(borrowed("Te1egrarn"), ["Telegram"]);
-        assert!(borrowed("Alice Smith").is_empty());
     }
 
     #[test]

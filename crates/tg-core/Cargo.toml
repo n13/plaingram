@@ -17,7 +17,6 @@ keyring = "4"
 td = { path = "../td" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
-unicode-security = "0.1.3"
 unicode-segmentation = "1"
 # Vendored, so the SIMD (unsafe) features GPUI and resvg enable on the crates.io copy stay off here; see vendor/README.md.
 zune-jpeg = { path = "../../vendor/zune-jpeg", default-features = false, features = ["std"] }
