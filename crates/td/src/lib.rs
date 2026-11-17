@@ -51,7 +51,10 @@ pub fn receive(timeout: f64) -> Option<enums::Update> {
         }
         return None;
     }
-    serde_json::from_value(response).inspect_err(|e| tracing::error!("unparseable TDLib update: {e}")).ok()
+    let kind = response["@type"].to_string();
+    serde_json::from_value(response)
+        .inspect_err(|e| tracing::error!("unparseable TDLib update {kind}: {:?} error", e.classify()))
+        .ok()
 }
 
 async fn send_request(client_id: i32, mut request: Value) -> Value {

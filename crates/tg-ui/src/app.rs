@@ -434,7 +434,7 @@ impl Plaingram {
             return;
         }
         if !is_allowed(&text) {
-            self.show_error(&format!("Not sent, characters outside the allowlist: {text}"));
+            self.show_error("Not sent: the message has characters outside the allowlist");
             cx.notify();
             return;
         }

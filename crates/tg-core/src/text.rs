@@ -155,13 +155,9 @@ pub fn sanitize(raw: &str) -> SafeText {
 }
 
 /// Like [`sanitize`] for names of people and chats, but the first letter decides the alphabet of the whole name,
-/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too. Logs each flagged name once.
+/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too.
 pub fn sanitize_name(raw: &str) -> SafeText {
-    let name = sanitize_with(raw, false);
-    if name.has_replacements() {
-        report(format!("flagged name: {raw:?}"));
-    }
-    name
+    sanitize_with(raw, false)
 }
 
 fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
