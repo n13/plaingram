@@ -56,6 +56,8 @@ const ATTACHMENT_SIZE: f32 = 96.;
 const SWITCHER_WIDTH: f32 = 480.;
 /// How far below the title bar a dialog sits.
 const MODAL_TOP: f32 = 60.;
+/// How close a dialog placed at the pointer comes to the window's edges.
+const MODAL_MARGIN: f32 = 8.;
 const CONFIRM_WIDTH: f32 = 440.;
 /// How strong and wide the halo around message bubbles is in themes that glow.
 const GLOW_ALPHA: f32 = 0.35;
@@ -167,11 +169,13 @@ pub(crate) enum Confirm {
     Leave {
         chat_id: i64,
     },
-    /// Reacting to a message, with the emoji Telegram allows for it once known.
+    /// Reacting to a message, with the emoji Telegram allows for it once known, picked from a dialog at `at`, where the
+    /// message was right-clicked.
     React {
         chat_id: i64,
         message_id: i64,
         choices: Option<Vec<(SafeText, ReactionId)>>,
+        at: Point<Pixels>,
     },
 }
 
@@ -438,7 +442,7 @@ impl Plaingram {
                 }
             }
             Event::AvailableReactions { chat_id, message_id, reactions } => {
-                if let Some(Confirm::React { chat_id: c, message_id: m, choices }) = &mut self.confirming
+                if let Some(Confirm::React { chat_id: c, message_id: m, choices, .. }) = &mut self.confirming
                     && (*c, *m) == (chat_id, message_id)
                 {
                     *choices = Some(reactions);
@@ -1099,14 +1103,14 @@ impl Plaingram {
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
                     .child(self.render_content(&message.content, Some((app, message.date)), cx))
                     .when(!message.reactions.is_empty(), |el| el.child(reactions(message, app, cx)))
-                    .context_menu(move |menu, _, _| {
+                    .context_menu(move |menu, window, _| {
                         let menu = match download.clone() {
                             Some(download) => {
                                 menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| download(cx)))
                             }
                             None => menu,
                         };
-                        let react = Confirm::React { chat_id, message_id, choices: None };
+                        let react = Confirm::React { chat_id, message_id, choices: None, at: window.mouse_position() };
                         let menu = menu.item(ask_item(&menu_app, "React…", react));
                         let menu = menu.item(ask_item(
                             &menu_app,
@@ -1439,11 +1443,15 @@ impl Plaingram {
                 cx.stop_propagation();
             }))
             .child(command);
-        modal(switcher, Self::close_switcher, cx)
+        modal(switcher, None, Self::close_switcher, cx)
     }
 
-    /// Asks to confirm a deletion, ban or leave; for a message, it offers only what Telegram allows.
+    /// Asks to confirm a deletion, ban or leave, or to pick a reaction; for a message, it offers only what Telegram allows.
     fn render_confirm(&self, confirm: Confirm, cx: &mut Context<Self>) -> Div {
+        let at = match confirm {
+            Confirm::React { at, .. } => Some(at),
+            Confirm::Delete { .. } | Confirm::Ban { .. } | Confirm::Leave { .. } => None,
+        };
         let choice = |id: &'static str, label: &'static str, for_everyone: bool| {
             Button::new(id)
                 .danger()
@@ -1485,7 +1493,7 @@ impl Plaingram {
             Confirm::React { choices: Some(choices), .. } if choices.is_empty() => {
                 (sanitize("Telegram does not allow reactions on this message."), Vec::new())
             }
-            Confirm::React { chat_id, message_id, choices } => {
+            Confirm::React { chat_id, message_id, choices, .. } => {
                 let emoji = choices.into_iter().flatten().enumerate().map(|(ix, (emoji, id))| {
                     Button::new(("react", ix)).ghost().child(safe_text(&emoji, cx)).on_click(cx.listener(
                         move |this, _, window, cx| {
@@ -1519,7 +1527,7 @@ impl Plaingram {
                         .on_click(cx.listener(|this, _, window, cx| this.close_confirm(window, cx))),
                 ),
             );
-        modal(dialog, Self::close_confirm, cx)
+        modal(dialog, at, Self::close_confirm, cx)
     }
 
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
@@ -1729,9 +1737,11 @@ fn ask_item(app: &Entity<Plaingram>, label: &'static str, confirm: Confirm) -> P
         .on_click(move |_, window, cx| app.update(cx, |this, cx| this.ask(confirm.clone(), window, cx)))
 }
 
-/// Dims the window under `content`, which sits near its top; a click outside calls `close`.
+/// Dims the window under `content`, which sits at `at` as far as the window allows, or else near its top; a click
+/// outside calls `close`.
 fn modal(
     content: impl IntoElement,
+    at: Option<Point<Pixels>>,
     close: fn(&mut Plaingram, &mut Window, &mut Context<Plaingram>),
     cx: &Context<Plaingram>,
 ) -> Div {
@@ -1745,7 +1755,15 @@ fn modal(
         .pt(px(MODAL_TOP))
         .bg(cx.theme().overlay)
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| close(this, window, cx)))
-        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(content))
+        .map(|el| {
+            let content = div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(content);
+            match at {
+                Some(at) => {
+                    el.child(anchored().position(at).snap_to_window_with_margin(px(MODAL_MARGIN)).child(content))
+                }
+                None => el.child(content),
+            }
+        })
 }
 
 type Download = Rc<dyn Fn(&mut App)>;

@@ -730,11 +730,13 @@ fn cli_proportional_draws_high_legibility_letters() {
 }
 
 /// Clicking an emoji reaction under a message reacts with it or takes the reaction back, while custom emoji and paid
-/// ones do nothing; React… in the message's menu offers the emoji Telegram allows. Like Telegram without Premium, the
-/// demo keeps one reaction per person.
+/// ones do nothing; React… in the message's menu offers the emoji Telegram allows, where the message was right-clicked
+/// but inside the window. Like Telegram without Premium, the demo keeps one reaction per person.
 #[test]
 fn reacting_from_the_chips_or_the_menu() {
     const TRAIL_MAP: i64 = 5;
+    const TRAIL_FILE: i64 = 6;
+    const PAY_HERE: i64 = 8;
     const HEART: (f32, f32) = (352., 394.);
     const CUSTOM_EMOJI: (f32, f32) = (470., 394.);
     const CAPTION: (f32, f32) = (448., 366.);
@@ -745,9 +747,9 @@ fn reacting_from_the_chips_or_the_menu() {
     scroll_to(&mut cx, &app, 4);
     cx.run_until_parked();
     draw(&mut cx, window);
-    let shown = |cx: &mut HeadlessAppContext| {
+    let shown = |cx: &mut HeadlessAppContext, id| {
         cx.update(|cx| {
-            let message = app.read(cx).messages.iter().find(|m| m.id == TRAIL_MAP).unwrap();
+            let message = app.read(cx).messages.iter().find(|m| m.id == id).unwrap();
             message.reactions.iter().map(|r| (r.emoji.to_string(), r.count, r.chosen)).collect::<Vec<_>>()
         })
     };
@@ -757,7 +759,7 @@ fn reacting_from_the_chips_or_the_menu() {
     cx.run_until_parked();
     let heart = "\u{2764}\u{FE0F}";
     assert_eq!(
-        shown(&mut cx),
+        shown(&mut cx, TRAIL_MAP),
         [reaction(heart, 5, true), reaction("\u{1F525}", 1, false), custom.clone(), paid.clone()],
         "the heart replaces the fire"
     );
@@ -765,21 +767,29 @@ fn reacting_from_the_chips_or_the_menu() {
     click(&mut cx, window, HEART.0, HEART.1);
     cx.run_until_parked();
     let before = [reaction(heart, 4, false), reaction("\u{1F525}", 1, false), custom, paid];
-    assert_eq!(shown(&mut cx), before, "clicking it again takes it back");
+    assert_eq!(shown(&mut cx, TRAIL_MAP), before, "clicking it again takes it back");
     draw(&mut cx, window);
     click(&mut cx, window, CUSTOM_EMOJI.0, CUSTOM_EMOJI.1);
     cx.run_until_parked();
-    assert_eq!(shown(&mut cx), before, "custom emoji are never sent");
+    assert_eq!(shown(&mut cx, TRAIL_MAP), before, "custom emoji are never sent");
 
-    draw(&mut cx, window);
-    press(&mut cx, window, MouseButton::Right, CAPTION.0, CAPTION.1);
-    cx.run_until_parked();
-    draw(&mut cx, window);
-    click(&mut cx, window, 480., 404.);
-    cx.run_until_parked();
-    screenshot(&mut cx, window, "react-picker");
-    click(&mut cx, window, 387., 155.);
-    cx.run_until_parked();
+    let pick = |cx: &mut HeadlessAppContext, message: (f32, f32), react: (f32, f32), emoji: (f32, f32), name| {
+        draw(cx, window);
+        press(cx, window, MouseButton::Right, message.0, message.1);
+        cx.run_until_parked();
+        draw(cx, window);
+        click(cx, window, react.0, react.1);
+        cx.run_until_parked();
+        screenshot(cx, window, name);
+        click(cx, window, emoji.0, emoji.1);
+        cx.run_until_parked();
+    };
+    let thumbs_up = [reaction("\u{1F44D}", 1, true)];
+    pick(&mut cx, CAPTION, (480., 404.), (505., 427.), "react-picker");
     assert!(cx.update(|cx| app.read(cx).confirming.is_none()), "picking closes the dialog");
-    assert_eq!(shown(&mut cx).last(), Some(&reaction("\u{1F44D}", 1, true)), "and reacts");
+    assert_eq!(shown(&mut cx, TRAIL_MAP).last(), thumbs_up.last(), "and reacts");
+    pick(&mut cx, (440., 657.), (470., 648.), (497., 682.), "react-picker-bottom");
+    assert_eq!(shown(&mut cx, PAY_HERE), thumbs_up, "near the bottom the dialog moves up into the window");
+    pick(&mut cx, (700., 480.), (732., 518.), (709., 541.), "react-picker-right");
+    assert_eq!(shown(&mut cx, TRAIL_FILE), thumbs_up, "and near the right edge, left");
 }
