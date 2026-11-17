@@ -26,10 +26,10 @@ use gpui_kit::*;
 use tg_core::{
     AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, SafeAccountInfo,
     SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic, SafeUser, Sender,
-    is_allowed, sanitize,
+    borrowed_names, is_allowed, sanitize,
 };
 
-use crate::safe_text::{name_label, safe_text, warning};
+use crate::safe_text::{name_label, name_warnings, safe_text, warning};
 
 const SIDEBAR_WIDTH: f32 = 300.;
 const CHAT_ROW_HEIGHT: f32 = 56.;
@@ -79,6 +79,9 @@ pub struct Plaingram {
     pub(crate) scroller: Entity<MessageScrollerState>,
     users: HashMap<i64, SafeUser>,
     pub(crate) chats: HashMap<i64, SafeChat>,
+    /// The folded names and @handles of each person and group, and who goes by each, to find look-alikes.
+    folded: HashMap<Sender, Vec<String>>,
+    by_folded: HashMap<String, Vec<Sender>>,
     positions: HashMap<ChatListId, HashMap<i64, i64>>,
     folders: Vec<(ChatListId, SharedString)>,
     folder_ix: usize,
@@ -221,6 +224,8 @@ impl Plaingram {
             scroller,
             users: HashMap::new(),
             chats: HashMap::new(),
+            folded: HashMap::new(),
+            by_folded: HashMap::new(),
             positions: HashMap::new(),
             folders: folder_tabs(&[], 0),
             folder_ix: 0,
@@ -256,13 +261,13 @@ impl Plaingram {
     fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::Auth(step) => self.set_auth(step, window, cx),
-            Event::User(user) => _ = self.users.insert(user.id, user),
-            Event::Chat(chat) => _ = self.chats.insert(chat.id, chat),
-            Event::ChatTitle { chat_id, title } => {
-                if let Some(chat) = self.chats.get_mut(&chat_id) {
+            Event::User(user) => self.refold(Sender::User(user.id), |this| _ = this.users.insert(user.id, user)),
+            Event::Chat(chat) => self.refold(Sender::Chat(chat.id), |this| _ = this.chats.insert(chat.id, chat)),
+            Event::ChatTitle { chat_id, title } => self.refold(Sender::Chat(chat_id), |this| {
+                if let Some(chat) = this.chats.get_mut(&chat_id) {
                     chat.title = title;
                 }
-            }
+            }),
             Event::ChatUnread { chat_id, count } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.unread = count;
@@ -687,19 +692,81 @@ impl Plaingram {
         cx.notify();
     }
 
-    /// Contacts whose name or handle looks like the name or handle of `user_id`, when that user is not a contact.
-    pub(crate) fn lookalikes(&self, user_id: i64) -> Vec<&SafeUser> {
-        let Some(user) = self.users.get(&user_id).filter(|user| !user.is_contact) else { return Vec::new() };
-        let skeletons = |u: &SafeUser| -> Vec<String> {
-            [Some(&u.name), u.username.as_ref()]
-                .into_iter()
-                .flatten()
-                .map(|text| skeleton(&text.to_string()))
-                .filter(|s| !s.is_empty())
-                .collect()
+    /// Files `who` under their folded names again after `change`, which may rename them. Private chats go by their
+    /// person's names, so only groups are filed as chats.
+    fn refold(&mut self, who: Sender, change: impl FnOnce(&mut Self)) {
+        change(self);
+        let names: Vec<&SafeText> = match who {
+            Sender::User(id) => {
+                self.users.get(&id).map(|u| [Some(&u.name), u.username.as_ref()].into_iter().flatten().collect())
+            }
+            Sender::Chat(id) => self
+                .chats
+                .get(&id)
+                .filter(|c| matches!(c.kind, ChatKind::Group | ChatKind::Forum))
+                .map(|c| vec![&c.title]),
+        }
+        .unwrap_or_default();
+        let mut folded: Vec<String> = names.into_iter().map(SafeText::folded).filter(|f| !f.is_empty()).collect();
+        folded.sort_unstable();
+        folded.dedup();
+        for old in self.folded.remove(&who).unwrap_or_default() {
+            self.by_folded.get_mut(&old).expect("folded names are filed").retain(|&other| other != who);
+        }
+        for new in &folded {
+            self.by_folded.entry(new.clone()).or_default().push(who);
+        }
+        self.folded.insert(who, folded);
+    }
+
+    /// Why `who` may pose as someone else: their name or @handle looks like a contact's or a group's, even when they
+    /// are a contact too, or uses a name scammers borrow, unless Telegram vouches for them. Never you.
+    pub(crate) fn lookalike_warnings(&self, who: Sender) -> Vec<String> {
+        let official = match who {
+            Sender::User(id) if self.is_me(id) => return Vec::new(),
+            Sender::User(id) => self.users.get(&id).is_some_and(|u| u.official),
+            Sender::Chat(_) => false,
         };
-        let suspect = skeletons(user);
-        self.users.values().filter(|c| c.is_contact && skeletons(c).iter().any(|s| suspect.contains(s))).collect()
+        let folded = self.folded.get(&who).map_or(&[][..], Vec::as_slice);
+        let mut alikes: Vec<Sender> = Vec::new();
+        for &other in folded.iter().flat_map(|f| &self.by_folded[f]) {
+            if other != who && !alikes.contains(&other) {
+                alikes.push(other);
+            }
+        }
+        let mut borrowed: Vec<_> = folded.iter().filter(|_| !official).flat_map(|f| borrowed_names(f)).collect();
+        borrowed.sort_unstable();
+        borrowed.dedup();
+        alikes
+            .into_iter()
+            .filter_map(|other| match other {
+                Sender::User(id) => self.users.get(&id).filter(|u| u.is_contact).map(|contact| {
+                    let handle = contact.username.as_ref().map_or_else(|| format!("id {id}"), |u| format!("@{u}"));
+                    format!("looks like your contact {} ({handle})", contact.name)
+                }),
+                Sender::Chat(id) => self.chats.get(&id).map(|group| format!("looks like your group {}", group.title)),
+            })
+            .chain(borrowed.into_iter().map(|name| format!("uses the name {name}")))
+            .collect()
+    }
+
+    /// The person a private chat is with, else the group.
+    fn chat_who(chat: &SafeChat) -> Sender {
+        match chat.kind {
+            ChatKind::Private { user_id } | ChatKind::Secret { user_id } => Sender::User(user_id),
+            ChatKind::Group | ChatKind::Forum => Sender::Chat(chat.id),
+        }
+    }
+
+    /// The badges of a name, then warnings that `who` may pose as someone else.
+    fn warnings(&self, name: &SafeText, who: Sender, cx: &App) -> Vec<Div> {
+        let lookalikes = self.lookalike_warnings(who).into_iter().map(|text| warning(text, cx));
+        name_warnings(name, cx).into_iter().chain(lookalikes).collect()
+    }
+
+    /// A name with its badges and warnings, wrapping onto more lines as needed.
+    fn warned_name(&self, name: &SafeText, who: Sender, cx: &App) -> Div {
+        h_flex().flex_wrap().gap_2().child(safe_text(name, cx)).children(self.warnings(name, who, cx))
     }
 
     fn folder(&self) -> ChatListId {
@@ -731,22 +798,26 @@ impl Plaingram {
         self.account.as_ref().is_some_and(|(me, _)| *me == user_id)
     }
 
-    fn chat_note(&self, chat: &SafeChat) -> String {
+    fn chat_note(&self, chat: &SafeChat) -> SafeText {
         match chat.kind {
-            ChatKind::Private { user_id } if self.is_me(user_id) => "only you".to_string(),
-            ChatKind::Group => "group".to_string(),
-            ChatKind::Forum => "group with topics".to_string(),
-            ChatKind::Private { user_id } => self.person_note(user_id),
-            ChatKind::Secret { user_id } => format!("secret · {}", self.person_note(user_id)),
+            ChatKind::Private { user_id } if self.is_me(user_id) => sanitize("only you"),
+            ChatKind::Group => sanitize("group"),
+            ChatKind::Forum => sanitize("group with topics"),
+            ChatKind::Private { user_id } => self.person_note(user_id, ""),
+            ChatKind::Secret { user_id } => SafeText::concat(&[&sanitize("secret · "), &self.person_note(user_id, "")]),
         }
     }
 
-    fn person_note(&self, user_id: i64) -> String {
-        let Some(user) = self.users.get(&user_id) else { return format!("id {user_id}") };
-        let handle = user.username.as_ref().map_or_else(|| format!("id {user_id}"), |name| format!("@{name}"));
+    /// The @handle, with its marks, and whether they are a bot or a contact, then `after`.
+    fn person_note(&self, user_id: i64, after: &str) -> SafeText {
+        let Some(user) = self.users.get(&user_id) else { return sanitize(&format!("id {user_id}{after}")) };
         let bot = if user.is_bot { " · bot" } else { "" };
         let contact = if user.is_contact { "" } else { " · not a contact" };
-        format!("{handle}{bot}{contact}")
+        let rest = sanitize(&format!("{bot}{contact}{after}"));
+        match &user.username {
+            Some(handle) => SafeText::concat(&[&sanitize("@"), handle, &rest]),
+            None => SafeText::concat(&[&sanitize(&format!("id {user_id}")), &rest]),
+        }
     }
 
     fn render_login(&self, cx: &mut Context<Self>) -> Div {
@@ -831,7 +902,10 @@ impl Plaingram {
             .when(self.open_chat == Some(id), |el| el.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id, cx)))
-            .child(chat_label(&self.chat_title(chat), self.chat_note(chat), cx).flex_1().min_w_0())
+            .child(chat_label(&self.chat_title(chat), &self.chat_note(chat), cx).flex_1().min_w_0())
+            .when(!self.lookalike_warnings(Self::chat_who(chat)).is_empty(), |el| {
+                el.child(warning("look-alike".into(), cx))
+            })
             .when(chat.unread > 0, |el| {
                 el.child(
                     div()
@@ -872,7 +946,7 @@ impl Plaingram {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_profile(user_id, cx))),
                     ChatKind::Group | ChatKind::Forum => header,
                 };
-                header.child(name_label(&self.chat_title(chat), cx))
+                header.child(self.warned_name(&self.chat_title(chat), Self::chat_who(chat), cx))
             })
             .when(!self.topics.is_empty(), |el| {
                 let selected = self.topics.iter().position(|t| Some(t.id) == self.topic).unwrap_or_default();
@@ -1040,13 +1114,12 @@ impl Plaingram {
     }
 
     fn render_reply(&self, reply: &SafeReply, cx: &App) -> Div {
-        let name = reply.sender.and_then(|sender| self.sender_name(sender));
         v_flex()
             .pl_2()
             .border_l_2()
             .border_color(cx.theme().foreground)
             .text_sm()
-            .children(name.map(|name| name_label(name, cx)))
+            .children(reply.sender.and_then(|sender| self.sender_label(sender, cx)))
             .child(div().line_clamp(2).text_color(cx.theme().muted_foreground).child(self.render_content(
                 &reply.content,
                 None,
@@ -1061,30 +1134,39 @@ impl Plaingram {
         }
     }
 
-    /// Clicking a person's name opens their profile.
+    /// The sender's name with its badges and warnings.
+    fn sender_label(&self, sender: Sender, cx: &App) -> Option<Div> {
+        self.sender_name(sender).map(|name| self.warned_name(name, sender, cx))
+    }
+
+    /// Name, badges, warnings and note in one row that wraps; clicking a person's name opens their profile.
     fn render_sender(&self, ix: usize, message: &SafeMessage, app: &Entity<Self>, cx: &App) -> Div {
         let time = timestamp(message.date, Local::now());
-        let row = h_flex().gap_2().text_xs();
-        let muted = |text: String| div().text_color(cx.theme().muted_foreground).child(text);
+        let row = h_flex().max_w_full().flex_wrap().gap_2().text_xs();
+        let muted = |text: SafeText| div().text_color(cx.theme().muted_foreground).child(safe_text(&text, cx));
         if message.outgoing {
-            return row.child("You").child(muted(time));
+            return row.child("You").child(muted(sanitize(&time)));
         }
-        let name = self.sender_name(message.sender).map(|name| name_label(name, cx));
+        let name = self.sender_name(message.sender);
+        let warnings = name.map(|name| self.warnings(name, message.sender, cx)).unwrap_or_default();
+        let name = name.map(|name| safe_text(name, cx));
         match message.sender {
             Sender::User(user_id) => {
                 let app = app.clone();
                 row.child(
-                    h_flex()
+                    div()
                         .id(("sender", ix))
-                        .gap_2()
                         .cursor_pointer()
                         .hover(|style| style.underline())
                         .on_click(move |_, _, cx| app.update(cx, |this, cx| this.toggle_profile(user_id, cx)))
-                        .children(name)
-                        .child(muted(format!("{} · {time}", self.person_note(user_id)))),
+                        .children(name),
                 )
+                .children(warnings)
+                .child(muted(self.person_note(user_id, &format!(" · {time}"))))
             }
-            Sender::Chat(chat_id) => row.children(name).child(muted(format!("chat {chat_id} · {time}"))),
+            Sender::Chat(chat_id) => {
+                row.children(name).children(warnings).child(muted(sanitize(&format!("chat {chat_id} · {time}"))))
+            }
         }
     }
 
@@ -1156,10 +1238,7 @@ impl Plaingram {
             .children(user.map(|user| identity(user, cx)))
             .child(div().text_xs().text_color(muted).child(status.chain(labels.into_iter().copied()).collect::<Vec<_>>().join(" · ")))
             .children(alarms.into_iter().map(|label| warning(format!("Telegram marks this account {label}"), cx)))
-            .children(self.lookalikes(user_id).into_iter().map(|contact| {
-                let handle = contact.username.as_ref().map_or_else(|| format!("id {}", contact.id), |u| format!("@{u}"));
-                warning(format!("looks like your contact {} ({handle})", contact.name), cx)
-            }))
+            .children(self.lookalike_warnings(Sender::User(user_id)).into_iter().map(|text| warning(text, cx)))
             .when_some(profile.filter(|p| !p.bio.is_empty()), |el, p| el.child(safe_text(&p.bio, cx)))
             .children(facts.into_iter().map(|(label, value)| fact(label, value, muted)))
             .when(info.is_none(), |el| {
@@ -1273,7 +1352,7 @@ impl Plaingram {
             .map(|id| {
                 let chat = &self.chats[id];
                 let (title, note) = (self.chat_title(chat), self.chat_note(chat));
-                CommandItem::new().child(move |_, cx| chat_label(&title, note.clone(), cx))
+                CommandItem::new().child(move |_, cx| chat_label(&title, &note, cx))
             })
             .collect();
         let app = cx.entity();
@@ -1500,15 +1579,18 @@ fn download(content: &SafeContent, date: i32, app: &Entity<Plaingram>) -> Option
 }
 
 /// A chat's name with its badges, over what kind of chat it is.
-fn chat_label(title: &SafeText, note: String, cx: &App) -> Div {
-    v_flex().child(name_label(title, cx)).child(div().text_xs().text_color(cx.theme().muted_foreground).child(note))
+fn chat_label(title: &SafeText, note: &SafeText, cx: &App) -> Div {
+    v_flex()
+        .overflow_hidden()
+        .child(name_label(title, cx))
+        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(safe_text(note, cx)))
 }
 
 /// A name and @handle, each with its badges.
 fn identity(user: &SafeUser, cx: &App) -> Div {
     v_flex()
         .gap_1()
-        .child(name_label(&user.name, cx))
+        .child(name_label(&user.name, cx).flex_wrap())
         .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
 }
 
@@ -1598,19 +1680,6 @@ fn age(date: i32, now: DateTime<Local>) -> String {
     }
 }
 
-/// Folds case, punctuation and look-alike characters, so "a1ice_smith_" and "Alice Smith" compare equal.
-fn skeleton(text: &str) -> String {
-    let text = text.to_lowercase().replace("rn", "m");
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| match c {
-            '0' => 'o',
-            '1' | 'i' => 'l',
-            c => c,
-        })
-        .collect()
-}
-
 fn month_year(month: u32, year: i32) -> String {
     NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1 to 12").format("%B %Y").to_string()
 }
@@ -1623,7 +1692,7 @@ fn local(date: i32) -> DateTime<Local> {
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::{qr_pixels, skeleton, timestamp};
+    use super::{qr_pixels, timestamp};
 
     /// Decodes the drawn code the way a phone camera would, so a wrong module size or quiet zone shows up here.
     #[test]
@@ -1650,15 +1719,5 @@ mod tests {
         assert_eq!(ago(86399), "23h ago");
         let absolute = ago(86400);
         assert!(absolute.starts_with("2027-01-1") && absolute.len() == 16, "{absolute}");
-    }
-
-    #[test]
-    fn skeletons_fold_look_alike_names_and_handles() {
-        assert_eq!(skeleton("Alice Smith"), skeleton("alice_smith_"));
-        assert_eq!(skeleton("a1ice.smith"), skeleton("AIice Smith"));
-        assert_eq!(skeleton("B0b Jones"), skeleton("bobjones"));
-        assert_eq!(skeleton("Mike"), skeleton("rnike"));
-        assert_ne!(skeleton("Alice Smith"), skeleton("Alice Smyth"));
-        assert_eq!(skeleton("\u{1F60A} ???"), "");
     }
 }

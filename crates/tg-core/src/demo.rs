@@ -19,6 +19,8 @@ const TRAIL_FILE: i32 = 3000;
 const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const PAYPAL: i64 = 13;
+/// "FamiIy", with a capital I, posing as the group Family (14).
+const FAKE_FAMILY: i64 = 17;
 const SAVED_MESSAGES: i64 = 16;
 const DEMO_SPACING: i32 = 5 * 3600;
 const GENERAL_TOPIC: i32 = 1;
@@ -64,13 +66,16 @@ impl Demo {
     fn sign_in(&self) {
         self.emit(Event::Auth(AuthStep::Ready));
         self.emit(Event::Account { user_id: ME, phone: sanitize("+15550100") });
-        for (id, name, username, is_contact) in [
-            (ME, "Sam Rivera", Some("samrivera"), false),
-            (2, "Alice Smith", Some("alice_smith"), true),
-            (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
-            (4, "Bob Jones", Some("bobj"), true),
-            (6, "Bob Jones", Some("bobjones_support"), false),
-            (5, "P\u{0430}ypal Support", None, false),
+        for (id, name, username, is_contact, official) in [
+            (ME, "Sam Rivera", Some("samrivera"), false, false),
+            (2, "Alice Smith", Some("alice_smith"), true, false),
+            (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false, false),
+            (4, "Bob Jones", Some("bobj"), true, false),
+            (6, "Bob Jones", Some("bobjones_support"), false, false),
+            (5, "P\u{0430}ypal Support", None, false, false),
+            (7, "AIice Smith", Some("a1ice_srnith"), false, false),
+            (8, "\u{0420}\u{0430}\u{0443}\u{0420}\u{0430}\u{04CF}", None, false, false),
+            (777_000, "Telegram", None, false, true),
         ] {
             self.emit(Event::User(SafeUser {
                 id,
@@ -78,6 +83,7 @@ impl Demo {
                 username: username.map(sanitize_name),
                 is_contact,
                 is_bot: false,
+                official,
             }));
         }
         self.emit(Event::AccountInfo {
@@ -105,6 +111,7 @@ impl Demo {
             (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 1, 3, vec![ChatListId::Archive]),
             (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 0, 2, vec![main, groups]),
             (FORUM, ChatKind::Forum, "Rust devs", 128, 1, vec![main, groups]),
+            (FAKE_FAMILY, ChatKind::Group, "FamiIy \u{2764}\u{FE0F}", 2, 1, vec![groups]),
         ] {
             self.emit(Event::Chat(SafeChat { id, kind, title: sanitize_name(title), unread }));
             for list in lists {
@@ -283,6 +290,10 @@ fn history(chat_id: i64, topic: Option<i32>) -> Vec<SafeMessage> {
         ],
         FORUM if topic == Some(2) => vec![(4, text("Release 2.0 is out: Москва and 東京 meetups next week \u{1F680}"))],
         FORUM => vec![(2, text("Welcome! Ask questions in Help.")), (4, text("Thanks \u{1F91D}"))],
+        FAKE_FAMILY => vec![
+            (7, text("Hi everyone, I moved us here, the old group got hacked")),
+            (8, text("Your payment is on hold. Verify your account to release it")),
+        ],
         _ => vec![(ME, text("Hey!")), (2, text("Hi \u{1F60A}"))],
     };
     let (now, count) = (now(), entries.len() as i32);

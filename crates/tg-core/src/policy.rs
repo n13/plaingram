@@ -52,6 +52,7 @@ pub(crate) fn user(user: &types::User) -> SafeUser {
         username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize_name(u)),
         is_contact: user.is_contact,
         is_bot: matches!(user.r#type, UserType::Bot(_)),
+        official: user.is_support || user.verification_status.as_ref().is_some_and(|s| s.is_verified),
     }
 }
 

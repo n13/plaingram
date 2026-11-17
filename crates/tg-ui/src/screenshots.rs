@@ -7,7 +7,7 @@ use gpui_kit::{
     AppContext as _, Entity, ExternalPaths, FileDropEvent, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
 };
-use tg_core::{AuthStep, Demo, SafeContent};
+use tg_core::{AuthStep, Demo, SafeContent, Sender};
 
 use crate::app::{Overlay, Plaingram, Viewer};
 
@@ -21,6 +21,7 @@ const ALICE: i64 = 10;
 const BOB: i64 = 12;
 const PAYPAL: i64 = 13;
 const FAMILY: i64 = 14;
+const FAKE_FAMILY: i64 = 17;
 const SAVED_MESSAGES: i64 = 16;
 
 #[test]
@@ -168,18 +169,31 @@ fn scroll_to(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>, ix: usize) {
     cx.update(|cx| app.update(cx, |app, cx| app.scroller.update(cx, |s, cx| assert!(s.scroll_to_item(ix, cx)))));
 }
 
-/// Demo user 6 copies the name of the contact Bob Jones (4); the impostor (3) copies the handle of Alice Smith (2).
+/// Demo user 6 copies the name of the contact Bob Jones (4), and the impostor (3) and user 7 that of Alice Smith (2),
+/// with look-alike letters; users 5 and 8 pose as PayPal, and the group 17 copies the title of the group Family (14).
 #[test]
-fn profiles_warn_about_look_alikes_of_contacts() {
+fn look_alikes_of_contacts_and_groups_and_borrowed_names_are_warned_about() {
     let mut cx = headless();
-    let (_, app) = open_demo(&mut cx, true);
-    let lookalikes = |cx: &mut HeadlessAppContext, user_id| {
-        cx.update(|cx| app.read(cx).lookalikes(user_id).iter().map(|user| user.id).collect::<Vec<_>>())
-    };
-    assert_eq!(lookalikes(&mut cx, 6), [4]);
-    assert_eq!(lookalikes(&mut cx, IMPOSTOR), [2]);
-    assert_eq!(lookalikes(&mut cx, 5), [] as [i64; 0]);
-    assert_eq!(lookalikes(&mut cx, 4), [] as [i64; 0], "contacts are not flagged");
+    let (window, app) = open_demo(&mut cx, true);
+    let warnings = |cx: &mut HeadlessAppContext, who| cx.update(|cx| app.read(cx).lookalike_warnings(who));
+    let alice = "looks like your contact Alice Smith (@alice_smith)";
+    assert_eq!(
+        warnings(&mut cx, Sender::User(6)),
+        ["looks like your contact Bob Jones (@bobj)", "uses the name Support"]
+    );
+    assert_eq!(warnings(&mut cx, Sender::User(IMPOSTOR)), [alice]);
+    assert_eq!(warnings(&mut cx, Sender::User(7)), [alice]);
+    assert_eq!(warnings(&mut cx, Sender::User(5)), ["uses the name PayPal", "uses the name Support"]);
+    assert_eq!(warnings(&mut cx, Sender::User(8)), ["uses the name PayPal"]);
+    assert_eq!(warnings(&mut cx, Sender::Chat(FAKE_FAMILY)), ["looks like your group Family \u{2764}\u{FE0F}"]);
+    assert_eq!(warnings(&mut cx, Sender::Chat(FAMILY)), ["looks like your group Famiiy \u{2764}\u{FE0F}"]);
+    assert!(warnings(&mut cx, Sender::User(4)).is_empty(), "the real Bob is not warned about his impostor");
+    assert!(warnings(&mut cx, Sender::User(1)).is_empty(), "and so are you");
+    assert!(warnings(&mut cx, Sender::User(777_000)).is_empty(), "Telegram vouches for its own account");
+    assert!(warnings(&mut cx, Sender::Chat(GROUP_CHAT)).is_empty());
+    open_chat(&mut cx, &app, FAKE_FAMILY);
+    draw(&mut cx, window);
+    screenshot(&mut cx, window, "look-alike-group");
 }
 
 /// The newest message in the demo group chat is from Bob Jones (4), whose name is at about (330, 554).
@@ -189,7 +203,7 @@ fn clicking_a_sender_opens_their_profile() {
     let (window, app) = open_demo(&mut cx, true);
     open_chat(&mut cx, &app, GROUP_CHAT);
     draw(&mut cx, window);
-    click(&mut cx, window, 330., 554.);
+    click(&mut cx, window, 340., 506.);
     assert_eq!(cx.update(|cx| app.read(cx).profile), Some(4));
 }
 
@@ -275,7 +289,7 @@ fn photos_open_full_window_and_escape_closes_them() {
     }
 }
 
-/// The demo document (file 3000) is at the top of the group chat; its menu opens under the pointer.
+/// Scrolled to, the demo document (file 3000) is at the top of the group chat; its menu opens under the pointer.
 #[test]
 fn right_clicking_a_file_offers_to_download_it() {
     const DOCUMENT: i32 = 3000;
@@ -283,10 +297,12 @@ fn right_clicking_a_file_offers_to_download_it() {
     let (window, app) = open_demo(&mut cx, true);
     open_chat(&mut cx, &app, GROUP_CHAT);
     draw(&mut cx, window);
-    press(&mut cx, window, MouseButton::Right, 495., 93.);
+    scroll_to(&mut cx, &app, 5);
+    draw(&mut cx, window);
+    press(&mut cx, window, MouseButton::Right, 495., 117.);
     cx.run_until_parked();
     draw(&mut cx, window);
-    press(&mut cx, window, MouseButton::Left, 535., 108.);
+    press(&mut cx, window, MouseButton::Left, 535., 132.);
     let progress = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).download_progress.get(&DOCUMENT).copied());
     assert_eq!(progress(&mut cx), Some(0.), "Download starts saving the file");
     cx.run_until_parked();
@@ -407,7 +423,7 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     let ranked = |cx: &mut HeadlessAppContext, query: &str| cx.update(|cx| app.read(cx).switcher_chats(query));
     assert_eq!(
         ranked(&mut cx, ""),
-        [FORUM, PAYPAL, SAVED_MESSAGES, ALICE, GROUP_CHAT, BOB, FAMILY],
+        [FORUM, PAYPAL, SAVED_MESSAGES, ALICE, GROUP_CHAT, BOB, FAMILY, FAKE_FAMILY],
         "opened last, then Telegram's order"
     );
     assert_eq!(

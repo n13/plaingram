@@ -76,6 +76,8 @@ pub struct SafeUser {
     pub username: Option<SafeText>,
     pub is_contact: bool,
     pub is_bot: bool,
+    /// Telegram verified the account, or it is Telegram's own support.
+    pub official: bool,
 }
 
 /// What a profile shows beyond [`SafeUser`], for judging whether an account is who it claims to be.
@@ -104,7 +106,7 @@ pub struct SafeAccountInfo {
     pub photo_changed: Option<i32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sender {
     User(i64),
     Chat(i64),
