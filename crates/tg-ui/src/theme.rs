@@ -52,8 +52,8 @@ pub struct Palette {
     on_alert: &'static str,
 }
 
-const TECHIE: Palette = Palette {
-    name: "Techie",
+const CLI: Palette = Palette {
+    name: "CLI",
     light: false,
     system_font: false,
     glow: false,
@@ -80,8 +80,8 @@ const TECHIE: Palette = Palette {
 };
 
 pub static THEMES: [Palette; 8] = [
-    TECHIE,
-    Palette { name: "Modern retro", system_font: true, ..TECHIE },
+    CLI,
+    Palette { name: "CLI proportional", system_font: true, ..CLI },
     Palette {
         name: "Orange glow",
         glow: true,
@@ -102,7 +102,7 @@ pub static THEMES: [Palette; 8] = [
         accent: "#3a2600",
         warning: "#33d6ff",
         danger: "#ff3b30",
-        ..TECHIE
+        ..CLI
     },
     Palette {
         name: "Paper white",
@@ -122,7 +122,7 @@ pub static THEMES: [Palette; 8] = [
         muted: "#161614",
         accent: "#2c2c28",
         danger: "#ff4d4d",
-        ..TECHIE
+        ..CLI
     },
     Palette {
         name: "DOS blue",
@@ -144,7 +144,7 @@ pub static THEMES: [Palette; 8] = [
         accent: "#00608a",
         warning: "#ffff55",
         danger: "#ff5555",
-        ..TECHIE
+        ..CLI
     },
     Palette {
         name: "C64",
@@ -167,7 +167,7 @@ pub static THEMES: [Palette; 8] = [
         accent: "#503f9e",
         warning: "#edf171",
         danger: "#ff7a70",
-        ..TECHIE
+        ..CLI
     },
     Palette {
         name: "Workbench",
@@ -189,7 +189,7 @@ pub static THEMES: [Palette; 8] = [
         accent: "#1a6cc4",
         warning: "#ffdd00",
         danger: "#ff3040",
-        ..TECHIE
+        ..CLI
     },
     Palette {
         name: "1-bit Mac",
@@ -214,7 +214,7 @@ pub static THEMES: [Palette; 8] = [
         accent: "#dcdcdc",
         warning: "#cc5500",
         danger: "#ff3b30",
-        ..TECHIE
+        ..CLI
     },
 ];
 

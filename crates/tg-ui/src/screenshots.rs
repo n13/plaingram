@@ -717,7 +717,7 @@ fn every_theme_draws_the_chat() {
 
 /// San Francisco's high legibility set reaches the text: with it, `Il1 0O` draws differently.
 #[test]
-fn modern_retro_draws_high_legibility_letters() {
+fn cli_proportional_draws_high_legibility_letters() {
     struct Sample(FontFeatures);
     impl Render for Sample {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -738,5 +738,5 @@ fn modern_retro_draws_high_legibility_letters() {
         cx.capture_screenshot(window.into()).unwrap().into_raw()
     };
     let plain = pixels(THEMES[0].font_features());
-    assert_ne!(plain, pixels(Palette::named("Modern retro").unwrap().font_features()));
+    assert_ne!(plain, pixels(Palette::named("CLI proportional").unwrap().font_features()));
 }
