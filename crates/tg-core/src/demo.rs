@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::client::Events;
 use crate::image::DecodedImage;
 use crate::model::{
-    AuthStep, Backend, ChatKind, ChatListId, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent, SafeFile,
-    SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
+    AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, SafeAccountInfo, SafeChat, SafeContent,
+    SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeTopic, SafeUser, Sender,
 };
 use crate::text::{is_allowed, sanitize, sanitize_name};
 
@@ -200,6 +200,15 @@ impl Backend for Demo {
     }
 
     fn mark_read(&self, _: i64, _: Vec<i64>) {}
+
+    fn load_delete_options(&self, chat_id: i64, message_id: i64) {
+        let options = DeleteOptions { for_me: true, for_everyone: true };
+        self.emit(Event::DeleteOptions { chat_id, message_id, options });
+    }
+
+    fn delete_message(&self, chat_id: i64, message_id: i64, _: bool) {
+        self.emit(Event::MessagesDeleted { chat_id, message_ids: vec![message_id] });
+    }
 
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String) {
         if is_allowed(&text) {

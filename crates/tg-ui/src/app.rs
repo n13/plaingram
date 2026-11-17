@@ -22,9 +22,9 @@ use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tg_core::{
-    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, Event, Events, PhotoRef, SafeAccountInfo, SafeChat,
-    SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic, SafeUser, Sender, is_allowed,
-    sanitize,
+    AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, SafeAccountInfo,
+    SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic, SafeUser, Sender,
+    is_allowed, sanitize,
 };
 
 use crate::safe_text::{name_label, safe_text, warning};
@@ -49,7 +49,9 @@ const QR_SIZE: f32 = 240.;
 /// Logical pixels of an attached photo's preview.
 const ATTACHMENT_SIZE: f32 = 96.;
 const SWITCHER_WIDTH: f32 = 480.;
-const SWITCHER_TOP: f32 = 60.;
+/// How far below the title bar a dialog sits.
+const MODAL_TOP: f32 = 60.;
+const DELETE_WIDTH: f32 = 440.;
 const SWITCHER_LIST_HEIGHT: f32 = 420.;
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
@@ -98,6 +100,8 @@ pub struct Plaingram {
     pub(crate) attachments: Vec<PathBuf>,
     /// The chat switcher, open over everything.
     pub(crate) switcher: Option<Entity<CommandState>>,
+    /// The message whose Delete was picked, until the user chooses how.
+    pub(crate) deleting: Option<Deleting>,
     overlay_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
@@ -120,6 +124,13 @@ pub(crate) enum Overlay {
     Settings {
         confirm_log_out: bool,
     },
+}
+
+/// A message to delete, with how Telegram allows it once known.
+pub(crate) struct Deleting {
+    chat_id: i64,
+    message_id: i64,
+    options: Option<DeleteOptions>,
 }
 
 /// A photo shown over the whole window.
@@ -215,6 +226,7 @@ impl Plaingram {
             overlay: None,
             attachments: Vec::new(),
             switcher: None,
+            deleting: None,
             overlay_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
@@ -326,6 +338,21 @@ impl Plaingram {
                     }
                 }
             }
+            Event::DeleteOptions { chat_id, message_id, options } => {
+                if let Some(deleting) =
+                    self.deleting.as_mut().filter(|d| d.chat_id == chat_id && d.message_id == message_id)
+                {
+                    deleting.options = Some(options);
+                }
+            }
+            Event::MessagesDeleted { chat_id, message_ids } if self.open_chat == Some(chat_id) => {
+                for id in message_ids {
+                    if let Some(ix) = self.messages.iter().position(|m| m.id == id) {
+                        self.messages.remove(ix);
+                        self.scroller.update(cx, |scroller, cx| _ = scroller.splice(ix..ix + 1, 0, cx));
+                    }
+                }
+            }
             Event::Account { user_id, phone } => self.account = Some((user_id, phone)),
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
@@ -333,7 +360,8 @@ impl Plaingram {
             | Event::Topics { .. }
             | Event::Topic { .. }
             | Event::Reply { .. }
-            | Event::Message(_) => {}
+            | Event::Message(_)
+            | Event::MessagesDeleted { .. } => {}
         }
         cx.notify();
     }
@@ -403,6 +431,7 @@ impl Plaingram {
         self.recent.retain(|&id| id != chat_id);
         self.recent.insert(0, chat_id);
         self.attachments.clear();
+        self.deleting = None;
         self.topics.clear();
         self.clear_history(None, cx);
         if self.chats.get(&chat_id).is_some_and(|chat| chat.kind == ChatKind::Forum) {
@@ -516,8 +545,32 @@ impl Plaingram {
 
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher = None;
-        self.compose.focus_handle(cx).focus(window, cx);
+        self.focus_compose(window, cx);
         cx.notify();
+    }
+
+    fn focus_compose(&self, window: &mut Window, cx: &mut App) {
+        self.compose.focus_handle(cx).focus(window, cx);
+    }
+
+    pub(crate) fn ask_delete(&mut self, chat_id: i64, message_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.client.load_delete_options(chat_id, message_id);
+        self.deleting = Some(Deleting { chat_id, message_id, options: None });
+        self.overlay_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.deleting = None;
+        self.focus_compose(window, cx);
+        cx.notify();
+    }
+
+    fn delete(&mut self, for_everyone: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(deleting) = self.deleting.take() {
+            self.client.delete_message(deleting.chat_id, deleting.message_id, for_everyone);
+        }
+        self.close_delete(window, cx);
     }
 
     fn jump_to(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -847,6 +900,8 @@ impl Plaingram {
     fn render_message(&self, ix: usize, app: &Entity<Self>, cx: &App) -> AnyElement {
         let Some(message) = self.messages.get(ix) else { return div().into_any_element() };
         let bubble = if message.outgoing { cx.theme().accent } else { cx.theme().secondary };
+        let (download, chat_id, message_id, menu_app) =
+            (download(&message.content, message.date, app), message.chat_id, message.id, app.clone());
         v_flex()
             .px_4()
             .py_1()
@@ -854,18 +909,31 @@ impl Plaingram {
             .child(self.render_sender(ix, message, app, cx))
             .child(
                 v_flex()
+                    .id(("message", message.id.unsigned_abs() as usize))
                     .max_w(px(520.))
                     .p_2()
                     .gap_2()
                     .bg(bubble)
                     .when_some(self.replies.get(&message.id), |el, reply| el.child(self.render_reply(reply, cx)))
-                    .child(self.render_content(&message.content, Some((app, message.date)), cx)),
+                    .child(self.render_content(&message.content, Some((app, message.date)), cx))
+                    .context_menu(move |menu, _, _| {
+                        let menu = match download.clone() {
+                            Some(download) => {
+                                menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| download(cx)))
+                            }
+                            None => menu,
+                        };
+                        let app = menu_app.clone();
+                        menu.item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| this.ask_delete(chat_id, message_id, window, cx))
+                        }))
+                    }),
             )
             .into_any_element()
     }
 
-    /// `message` is the app and the message date, which make photos open on click, and photos and files save on
-    /// right-click; reply quotes pass `None` and show photos as a label.
+    /// `message` is the app and the message date, which make photos open on click; reply quotes pass `None` and show
+    /// photos as a label.
     fn render_content(&self, content: &SafeContent, message: Option<(&Entity<Self>, i32)>, cx: &App) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         match content {
@@ -875,25 +943,13 @@ impl Plaingram {
                 .child(match message {
                     None => div().text_color(muted).child("[photo]").into_any_element(),
                     Some((app, date)) => {
-                        let (file_id, name) = (photo.file_id, photo_name(date));
-                        let viewer = Viewer { photo: *photo, save_as: Some(name.clone()) };
-                        let (open, save) = (app.clone(), app.clone());
+                        let viewer = Viewer { photo: *photo, save_as: Some(photo_name(date)) };
+                        let app = app.clone();
                         div()
                             .id(("photo", photo.file_id.unsigned_abs() as usize))
                             .cursor_pointer()
-                            .on_click({
-                                let viewer = viewer.clone();
-                                move |_, window, cx| {
-                                    open.update(cx, |this, cx| {
-                                        this.open_overlay(Overlay::Photo(viewer.clone()), window, cx)
-                                    })
-                                }
-                            })
-                            .context_menu(move |menu, _, _| {
-                                let (save, name) = (save.clone(), name.clone());
-                                menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| {
-                                    save.read(cx).client.save_photo(file_id, name.clone());
-                                }))
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| this.open_overlay(Overlay::Photo(viewer.clone()), window, cx))
                             })
                             .child(self.render_photo(photo, PHOTO_MAX_WIDTH, cx))
                             .into_any_element()
@@ -915,17 +971,7 @@ impl Plaingram {
                     .when_some(self.download_progress.get(&file.file_id), |el, progress| {
                         el.child(format!("· saving {:.0}%", progress * 100.))
                     });
-                let Some((app, _)) = message else { return label.into_any_element() };
-                let (app, file_id, name) = (app.clone(), file.file_id, file.name.to_string());
-                label
-                    .id(("file", file_id.unsigned_abs() as usize))
-                    .context_menu(move |menu, _, _| {
-                        let (app, name) = (app.clone(), name.clone());
-                        menu.item(PopupMenuItem::new("Download").on_click(move |_, _, cx| {
-                            app.update(cx, |this, cx| this.save_file(file_id, name.clone(), cx));
-                        }))
-                    })
-                    .into_any_element()
+                label.into_any_element()
             }
         }
     }
@@ -1172,26 +1218,63 @@ impl Plaingram {
                 move |_, _, cx| app.update(cx, |_, cx| cx.notify())
             })
             .on_confirm(move |ix, window, cx| app.update(cx, |this, cx| this.jump_to(chats[ix.row], window, cx)));
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(SWITCHER_TOP))
-            .bg(cx.theme().overlay)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_switcher(window, cx)))
+        let switcher = div()
+            .w(px(SWITCHER_WIDTH))
+            .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
+                this.close_switcher(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(command);
+        modal(switcher, Self::close_switcher, cx)
+    }
+
+    /// Asks how to delete a message, offering only what Telegram allows for it.
+    fn render_delete(&self, deleting: &Deleting, cx: &mut Context<Self>) -> Div {
+        let options = deleting.options;
+        let choice = |id: &'static str, label: &'static str, for_everyone: bool| {
+            Button::new(id)
+                .danger()
+                .label(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.delete(for_everyone, window, cx)))
+        };
+        let question = match options {
+            Some(DeleteOptions { for_me: false, for_everyone: false }) => {
+                "Telegram does not allow deleting this message."
+            }
+            _ => "Delete this message?",
+        };
+        let dialog = v_flex()
+            .id("delete-message")
+            .w(px(DELETE_WIDTH))
+            .p_4()
+            .gap_3()
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(cx.theme().border)
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_delete(window, cx);
+                }
+            }))
+            .child(question)
             .child(
-                div()
-                    .w(px(SWITCHER_WIDTH))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
-                        this.close_switcher(window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .child(command),
-            )
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .when(options.is_some_and(|o| o.for_everyone), |el| {
+                        el.child(choice("delete-for-everyone", "Delete for everyone", true))
+                    })
+                    .when(options.is_some_and(|o| o.for_me), |el| {
+                        el.child(choice("delete-for-me", "Delete for me", false))
+                    })
+                    .child(
+                        Button::new("cancel-delete")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, window, cx| this.close_delete(window, cx))),
+                    ),
+            );
+        modal(dialog, Self::close_delete, cx)
     }
 
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
@@ -1282,8 +1365,46 @@ impl Render for Plaingram {
                     .relative()
                     .child(body)
                     .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx)))
+                    .when_some(self.deleting.as_ref(), |el, deleting| el.child(self.render_delete(deleting, cx)))
                     .when_some(self.switcher.as_ref(), |el, switcher| el.child(self.render_switcher(switcher, cx))),
             )
+    }
+}
+
+/// Dims the window under `content`, which sits near its top; a click outside calls `close`.
+fn modal(
+    content: impl IntoElement,
+    close: fn(&mut Plaingram, &mut Window, &mut Context<Plaingram>),
+    cx: &Context<Plaingram>,
+) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .justify_center()
+        .items_start()
+        .pt(px(MODAL_TOP))
+        .bg(cx.theme().overlay)
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| close(this, window, cx)))
+        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(content))
+}
+
+type Download = Rc<dyn Fn(&mut App)>;
+
+/// What a message's Download does: photos are re-encoded, other files saved as sent.
+fn download(content: &SafeContent, date: i32, app: &Entity<Plaingram>) -> Option<Download> {
+    let app = app.clone();
+    match content {
+        SafeContent::Photo { photo, .. } => {
+            let (file_id, name) = (photo.file_id, photo_name(date));
+            Some(Rc::new(move |cx| app.read(cx).client.save_photo(file_id, name.clone())))
+        }
+        SafeContent::File { file, .. } => {
+            let (file_id, name) = (file.file_id, file.name.to_string());
+            Some(Rc::new(move |cx| app.update(cx, |this, cx| this.save_file(file_id, name.clone(), cx))))
+        }
+        SafeContent::Text(_) | SafeContent::Service(_) | SafeContent::Hidden(_) => None,
     }
 }
 

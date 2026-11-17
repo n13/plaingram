@@ -18,6 +18,15 @@ pub enum AuthStep {
     Closed,
 }
 
+/// How a message can be deleted, as Telegram allows for this account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeleteOptions {
+    /// Only from this account's copy of the chat.
+    pub for_me: bool,
+    /// For every member of the chat.
+    pub for_everyone: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatKind {
     Private {
@@ -154,6 +163,16 @@ pub enum Event {
     Auth(AuthStep),
     /// Chats opened on this computer, the most recent first.
     RecentChats(Vec<i64>),
+    DeleteOptions {
+        chat_id: i64,
+        message_id: i64,
+        options: DeleteOptions,
+    },
+    /// Messages gone from a chat, deleted here or by someone else.
+    MessagesDeleted {
+        chat_id: i64,
+        message_ids: Vec<i64>,
+    },
     /// The signed-in account.
     Account {
         user_id: i64,
@@ -248,6 +267,9 @@ pub trait Backend {
     fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64);
     fn load_topics(&self, chat_id: i64);
     fn mark_read(&self, chat_id: i64, message_ids: Vec<i64>);
+    /// Emits [`Event::DeleteOptions`].
+    fn load_delete_options(&self, chat_id: i64, message_id: i64);
+    fn delete_message(&self, chat_id: i64, message_id: i64, for_everyone: bool);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
     /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
     fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);

@@ -9,13 +9,13 @@ use async_channel::Receiver;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
     AuthorizationState, ChatActionBar, ChatList, ChatPhotos, Chats, File, ForumTopics, InputFile, InputMessageContent,
-    Message, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
+    Message, MessageProperties, MessageReplyTo, MessageTopic, Messages, Update, User, UserFullInfo,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
 
 use crate::image::{decode_jpeg, encode_jpeg, prepare_upload};
-use crate::model::{AuthStep, Backend, Event};
+use crate::model::{AuthStep, Backend, DeleteOptions, Event};
 use crate::paths;
 use crate::policy;
 use crate::text::{is_allowed, sanitize, sanitize_name};
@@ -201,6 +201,29 @@ impl Backend for Client {
             }
             this.emit(Event::Topics { chat_id, topics });
             Ok(())
+        });
+    }
+
+    fn load_delete_options(&self, chat_id: i64, message_id: i64) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            let MessageProperties::MessageProperties(properties) =
+                functions::get_message_properties(chat_id, message_id, this.id()).await.map_err(td_error)?;
+            let options = DeleteOptions {
+                for_me: properties.can_be_deleted_only_for_self,
+                for_everyone: properties.can_be_deleted_for_all_users,
+            };
+            this.emit(Event::DeleteOptions { chat_id, message_id, options });
+            Ok(())
+        });
+    }
+
+    fn delete_message(&self, chat_id: i64, message_id: i64, for_everyone: bool) {
+        let this = self.clone();
+        self.spawn(async move {
+            this.ensure_allowed(chat_id)?;
+            functions::delete_messages(chat_id, vec![message_id], for_everyone, this.id()).await.map_err(td_error)
         });
     }
 
@@ -430,6 +453,9 @@ impl Client {
             Update::MessageSendFailed(u) => {
                 self.remove_upload(u.old_message_id)?;
                 bail!("sending failed: {}", u.error.message)
+            }
+            Update::DeleteMessages(u) if u.is_permanent && self.is_allowed(u.chat_id) => {
+                self.emit(Event::MessagesDeleted { chat_id: u.chat_id, message_ids: u.message_ids });
             }
             _ => {}
         }

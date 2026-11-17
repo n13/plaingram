@@ -446,3 +446,33 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     assert!(!switcher_open(&mut cx), "a click outside closes");
     assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(SAVED_MESSAGES));
 }
+
+/// Right-clicking a message offers Delete, which asks how to delete it before removing it from the chat.
+#[test]
+fn right_clicking_a_message_deletes_it() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    let last = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).messages.last().map(|m| m.id));
+    let doomed = last(&mut cx);
+    let deleting = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).deleting.is_some());
+    let ask = |cx: &mut HeadlessAppContext| {
+        press(cx, window, MouseButton::Right, 550., 649.);
+        cx.run_until_parked();
+        draw(cx, window);
+        click(cx, window, 583., 663.);
+    };
+    ask(&mut cx);
+    assert!(deleting(&mut cx), "Delete asks how");
+    screenshot(&mut cx, window, "delete-message");
+    key(&mut cx, window, "escape");
+    assert!(!deleting(&mut cx), "Escape cancels");
+    assert_eq!(last(&mut cx), doomed, "and keeps the message");
+
+    ask(&mut cx);
+    draw(&mut cx, window);
+    click(&mut cx, window, 484., 156.);
+    assert!(!deleting(&mut cx));
+    assert!(last(&mut cx) != doomed, "Delete for everyone removes it from the chat");
+}
