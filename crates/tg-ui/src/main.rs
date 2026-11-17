@@ -5,6 +5,7 @@ mod screenshots;
 mod theme;
 
 use std::fs::{self, OpenOptions};
+use std::rc::Rc;
 use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn open(backend: Box<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
+fn open(backend: Rc<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
     theme::init(cx)?;
     cx.on_window_closed(|cx, _| cx.quit()).detach();
     let window = TitleBar::window_options();
@@ -47,13 +48,13 @@ fn open(backend: Box<dyn Backend>, events: Events, cx: &mut App) -> Result<()> {
 }
 
 #[cfg(not(feature = "demo"))]
-fn start_backend() -> Result<(Box<dyn Backend>, Events)> {
+fn start_backend() -> Result<(Rc<dyn Backend>, Events)> {
     let (client, events) = tg_core::Client::start()?;
-    Ok((Box::new(client), events))
+    Ok((Rc::new(client), events))
 }
 
 #[cfg(feature = "demo")]
-fn start_backend() -> Result<(Box<dyn Backend>, Events)> {
+fn start_backend() -> Result<(Rc<dyn Backend>, Events)> {
     let (demo, events) = tg_core::Demo::start(false);
-    Ok((Box::new(demo), events))
+    Ok((Rc::new(demo), events))
 }

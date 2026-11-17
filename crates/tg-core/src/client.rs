@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::thread;
 
@@ -79,7 +80,10 @@ struct Allowed {
 /// Every TDLib object is converted by [`policy`] before it leaves this type.
 #[derive(Clone)]
 pub struct Client {
-    id: i32,
+    /// The current TDLib instance; a new one starts whenever the last one closes.
+    id: Arc<AtomicI32>,
+    /// Whether to sign in with a phone number and a code instead of the default QR code.
+    use_phone: Arc<AtomicBool>,
     data_dir: PathBuf,
     events: async_channel::Sender<Event>,
     allowed: Arc<Mutex<Allowed>>,
@@ -90,11 +94,10 @@ impl Client {
         td::set_log_verbosity(1).map_err(td_error)?;
         let data_dir = paths::data_dir()?;
         let (events, receiver) = async_channel::unbounded();
-        let client = Self { id: td::create_client(), data_dir, events, allowed: Arc::default() };
+        let client = Self { id: Arc::default(), use_phone: Arc::default(), data_dir, events, allowed: Arc::default() };
+        client.start_tdlib();
         let worker = client.clone();
         thread::Builder::new().name("tdlib-updates".into()).spawn(move || worker.receive_loop())?;
-        let id = client.id;
-        client.spawn(async move { functions::get_authorization_state(id).await.map(drop).map_err(td_error) });
         Ok((client, receiver))
     }
 }
@@ -109,39 +112,43 @@ impl Backend for Client {
         });
     }
 
+    fn log_in_with_qr(&self) {
+        self.use_phone.store(false, Ordering::Relaxed);
+        let id = self.id();
+        self.spawn(async move { login_request(functions::request_qr_code_authentication(Vec::new(), id).await) });
+    }
+
+    fn log_in_with_phone(&self) {
+        self.use_phone.store(true, Ordering::Relaxed);
+        // TDLib takes no phone number once it shows a QR code, so this closes it and a fresh instance asks for one.
+        self.close_tdlib();
+    }
+
     fn submit_phone(&self, phone: String) {
-        let id = self.id;
-        self.spawn(async move {
-            match functions::set_authentication_phone_number(phone, None, id).await {
-                Err(e) if e.message == "API_ID_INVALID" => {
-                    match keychain(KEYCHAIN_API_CREDENTIALS)?.delete_credential() {
-                        Ok(()) => bail!("Telegram rejected the API ID and hash; restart plaingram to enter them again"),
-                        Err(keyring::Error::NoEntry) => {
-                            bail!("Telegram rejected the API ID built into this copy of plaingram; get a newer release")
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-                result => result.map_err(td_error),
-            }
-        });
+        let id = self.id();
+        self.spawn(async move { login_request(functions::set_authentication_phone_number(phone, None, id).await) });
     }
 
     fn submit_code(&self, code: String) {
-        let id = self.id;
+        let id = self.id();
         self.spawn(async move { functions::check_authentication_code(code, id).await.map_err(td_error) });
     }
 
     fn submit_password(&self, password: String) {
-        let id = self.id;
+        let id = self.id();
         self.spawn(async move { functions::check_authentication_password(password, id).await.map_err(td_error) });
+    }
+
+    fn log_out(&self) {
+        self.use_phone.store(false, Ordering::Relaxed);
+        self.close_tdlib();
     }
 
     fn open_chat(&self, chat_id: i64, topic: Option<i32>) {
         let this = self.clone();
         self.spawn(async move {
             this.ensure_allowed(chat_id)?;
-            functions::open_chat(chat_id, this.id).await.map_err(td_error)?;
+            functions::open_chat(chat_id, this.id()).await.map_err(td_error)?;
             let history = this.history(chat_id, topic, 0, HISTORY_SIZE).await?;
             this.mark_read_now(chat_id, history.iter().map(|m| m.id).collect()).await?;
             this.emit(Event::History { chat_id, topic, messages: history.iter().map(policy::message).collect() });
@@ -170,7 +177,7 @@ impl Backend for Client {
             let (mut date, mut message_id, mut topic_id) = (0, 0, 0);
             loop {
                 let ForumTopics::ForumTopics(page) =
-                    functions::get_forum_topics(chat_id, String::new(), date, message_id, topic_id, 100, this.id)
+                    functions::get_forum_topics(chat_id, String::new(), date, message_id, topic_id, 100, this.id())
                         .await
                         .map_err(td_error)?;
                 let done = page.topics.is_empty();
@@ -202,7 +209,7 @@ impl Backend for Client {
                 clear_draft: true,
             });
             let topic = topic.map(|forum_topic_id| MessageTopic::Forum(types::MessageTopicForum { forum_topic_id }));
-            functions::send_message(chat_id, topic, None, None, content, this.id).await.map_err(td_error)?;
+            functions::send_message(chat_id, topic, None, None, content, this.id()).await.map_err(td_error)?;
             Ok(())
         });
     }
@@ -235,7 +242,7 @@ impl Backend for Client {
     }
 
     fn load_profile(&self, user_id: i64) {
-        let id = self.id;
+        let id = self.id();
         let this = self.clone();
         self.spawn(async move {
             let User::User(user) = functions::get_user(user_id, id).await.map_err(td_error)?;
@@ -262,8 +269,8 @@ impl Client {
         while history.len() < count {
             let limit = (count - history.len()).min(TDLIB_PAGE_LIMIT).try_into()?;
             let page = match topic {
-                Some(topic) => functions::get_forum_topic_history(chat_id, topic, from, 0, limit, self.id).await,
-                None => functions::get_chat_history(chat_id, from, 0, limit, false, self.id).await,
+                Some(topic) => functions::get_forum_topic_history(chat_id, topic, from, 0, limit, self.id()).await,
+                None => functions::get_chat_history(chat_id, from, 0, limit, false, self.id()).await,
             };
             let Messages::Messages(page) = page.map_err(td_error)?;
             let page: Vec<_> = page.messages.into_iter().flatten().collect();
@@ -277,13 +284,13 @@ impl Client {
 
     async fn mark_read_now(&self, chat_id: i64, message_ids: Vec<i64>) -> Result<()> {
         self.ensure_allowed(chat_id)?;
-        functions::view_messages(chat_id, message_ids, None, true, self.id).await.map_err(td_error)
+        functions::view_messages(chat_id, message_ids, None, true, self.id()).await.map_err(td_error)
     }
 
     /// Emits what `message` replies to, if anything.
     fn load_reply(&self, message: &types::Message) {
         let Some(MessageReplyTo::Message(reply_to)) = message.reply_to.clone() else { return };
-        let (chat_id, message_id, id) = (message.chat_id, message.id, self.id);
+        let (chat_id, message_id, id) = (message.chat_id, message.id, self.id());
         let this = self.clone();
         self.spawn(async move {
             let reply = if reply_to.message_id == 0 {
@@ -362,7 +369,7 @@ impl Client {
             Update::ChatFolders(u) => {
                 for folder in &u.chat_folders {
                     let list = ChatList::Folder(types::ChatListFolder { chat_folder_id: folder.id });
-                    self.spawn(load_all_chats(self.id, list));
+                    self.spawn(load_all_chats(self.id(), list));
                 }
                 let main_position = u.main_chat_list_position.try_into()?;
                 ensure!(main_position <= u.chat_folders.len(), "'All chats' position {main_position} is out of range");
@@ -396,15 +403,28 @@ impl Client {
                 }
                 None => AuthStep::ApiCredentials,
             },
-            AuthorizationState::WaitPhoneNumber => AuthStep::Phone,
+            AuthorizationState::WaitPhoneNumber if self.use_phone.load(Ordering::Relaxed) => AuthStep::Phone,
+            AuthorizationState::WaitPhoneNumber => {
+                self.log_in_with_qr();
+                return Ok(());
+            }
+            AuthorizationState::WaitOtherDeviceConfirmation(state) => {
+                ensure!(state.link.starts_with("tg://login?token="), "TDLib sent an unexpected QR code link");
+                AuthStep::Qr { link: state.link }
+            }
             AuthorizationState::WaitCode(_) => AuthStep::Code,
             AuthorizationState::WaitPassword(p) => AuthStep::Password { hint: sanitize(&p.password_hint) },
             AuthorizationState::Ready => {
-                self.spawn(load_all_chats(self.id, ChatList::Main));
-                self.spawn(load_all_chats(self.id, ChatList::Archive));
+                self.spawn(self.clone().emit_account());
+                self.spawn(load_all_chats(self.id(), ChatList::Main));
+                self.spawn(load_all_chats(self.id(), ChatList::Archive));
                 AuthStep::Ready
             }
-            AuthorizationState::Closed => AuthStep::Closed,
+            AuthorizationState::Closed => {
+                *self.allowed() = Allowed::default();
+                self.start_tdlib();
+                AuthStep::Closed
+            }
             AuthorizationState::LoggingOut | AuthorizationState::Closing => return Ok(()),
             other => bail!("unsupported login step {}; finish it in the official app", policy::variant_name(&other)),
         };
@@ -429,15 +449,38 @@ impl Client {
             "Desktop".into(),
             "macOS".into(),
             env!("CARGO_PKG_VERSION").into(),
-            self.id,
+            self.id(),
         )
         .await
         .map_err(td_error)
     }
 
+    /// Creates a TDLib instance, whose first update asks for its parameters.
+    fn start_tdlib(&self) {
+        let id = td::create_client();
+        self.id.store(id, Ordering::Relaxed);
+        self.spawn(async move { functions::get_authorization_state(id).await.map(drop).map_err(td_error) });
+    }
+
+    /// Logs out, which deletes TDLib's database and files and closes it; [`AuthorizationState::Closed`] starts a new one.
+    fn close_tdlib(&self) {
+        let id = self.id();
+        self.spawn(async move { functions::log_out(id).await.map_err(td_error) });
+    }
+
+    fn id(&self) -> i32 {
+        self.id.load(Ordering::Relaxed)
+    }
+
+    async fn emit_account(self) -> Result<()> {
+        let User::User(me) = functions::get_me(self.id()).await.map_err(td_error)?;
+        self.emit(Event::Account { user_id: me.id, phone: sanitize(&format!("+{}", me.phone_number)) });
+        Ok(())
+    }
+
     /// Downloads a file completely and returns where TDLib keeps it.
     async fn download(&self, file_id: i32) -> Result<PathBuf> {
-        let File::File(file) = functions::download_file(file_id, 1, 0, 0, true, self.id).await.map_err(td_error)?;
+        let File::File(file) = functions::download_file(file_id, 1, 0, 0, true, self.id()).await.map_err(td_error)?;
         ensure!(file.local.is_downloading_completed, "file {file_id} did not finish downloading");
         Ok(file.local.path.into())
     }
@@ -500,6 +543,21 @@ impl Client {
     fn ensure_allowed(&self, chat_id: i64) -> Result<()> {
         ensure!(self.is_allowed(chat_id), "chat {chat_id} is not allowed");
         Ok(())
+    }
+}
+
+/// The result of the first request that reaches Telegram, which rejects a bad API ID there. A rejected ID from the
+/// keychain is deleted, so the next start asks for it again.
+fn login_request(result: Result<(), types::Error>) -> Result<()> {
+    match result {
+        Err(e) if e.message == "API_ID_INVALID" => match keychain(KEYCHAIN_API_CREDENTIALS)?.delete_credential() {
+            Ok(()) => bail!("Telegram rejected the API ID and hash; restart plaingram to enter them again"),
+            Err(keyring::Error::NoEntry) => {
+                bail!("Telegram rejected the API ID built into this copy of plaingram; get a newer release")
+            }
+            Err(e) => Err(e.into()),
+        },
+        result => result.map_err(td_error),
     }
 }
 

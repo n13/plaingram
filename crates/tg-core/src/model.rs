@@ -4,10 +4,17 @@ use crate::text::SafeText;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthStep {
     ApiCredentials,
+    /// Scan `link` as a QR code with Telegram on a signed-in device. It changes every 30 seconds or so.
+    Qr {
+        link: String,
+    },
     Phone,
     Code,
-    Password { hint: SafeText },
+    Password {
+        hint: SafeText,
+    },
     Ready,
+    /// TDLib closed, after logging out or leaving the QR code for a phone number; a fresh instance is starting.
     Closed,
 }
 
@@ -145,6 +152,11 @@ pub struct SafeReply {
 #[derive(Debug)]
 pub enum Event {
     Auth(AuthStep),
+    /// The signed-in account.
+    Account {
+        user_id: i64,
+        phone: SafeText,
+    },
     User(SafeUser),
     Chat(SafeChat),
     ChatTitle {
@@ -219,9 +231,15 @@ pub enum Event {
 /// Commands the UI can issue; results arrive as [`Event`]s.
 pub trait Backend {
     fn submit_api_credentials(&self, api_id: String, api_hash: String);
+    /// Signs in by scanning a QR code with Telegram on another device, the default.
+    fn log_in_with_qr(&self);
+    /// Signs in with a phone number and a code instead.
+    fn log_in_with_phone(&self);
     fn submit_phone(&self, phone: String);
     fn submit_code(&self, code: String);
     fn submit_password(&self, password: String);
+    /// Logs out and deletes everything TDLib stored, then starts over at sign-in.
+    fn log_out(&self);
     /// Loads the history of a chat, or of one topic in a forum.
     fn open_chat(&self, chat_id: i64, topic: Option<i32>);
     /// Loads messages older than message `before`, as an [`Event::OlderHistory`].

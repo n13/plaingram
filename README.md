@@ -29,7 +29,7 @@ I am pretty confident impersonation particularly becomes impossible with the las
 
 ## Download
 
-Releases for macOS (Apple Silicon) and Linux (x86_64) are on the [Releases page](../../releases), with install notes. They are built from the tagged source by GitHub Actions (`.github/workflows/release.yml`) and include plaingram's Telegram API ID, so they sign in right away. Create your account and finish any email or registration steps in the official app first.
+Releases for macOS (Apple Silicon) and Linux (x86_64) are on the [Releases page](../../releases), with install notes. They are built from the tagged source by GitHub Actions (`.github/workflows/release.yml`) and include plaingram's Telegram API ID, so they sign in right away. Sign-in shows a QR code to scan in Telegram on your phone (Settings > Devices), like the official desktop apps; "Log in using phone number" switches to a login code instead. Create your account and finish any email or registration steps in the official app first. Settings, top right, shows the signed-in account and logs out, which deletes the chats, photos and files TDLib stored for it.
 
 ## Build from source
 

@@ -14,6 +14,7 @@ anyhow = "1.0.104"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui-kit = "0.9"
 image = { version = "0.25", default-features = false }
+qrcode = { version = "0.14.1", default-features = false }
 serde_json = "1"
 tg-core = { path = "../tg-core" }
 tracing = "0.1.44"
@@ -26,6 +27,7 @@ demo = ["tg-core/demo"]
 gpui-kit = { version = "0.9", features = ["test-support"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = "0.46"
+rqrr = { version = "0.11.0", default-features = false }
 tg-core = { path = "../tg-core", features = ["demo"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

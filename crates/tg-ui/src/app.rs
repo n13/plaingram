@@ -39,6 +39,12 @@ const PHOTO_LOOKAHEAD: Duration = Duration::from_secs(1);
 const PHOTO_LOOKAHEAD_ROWS: usize = 30;
 /// How far back scroll positions count toward the scroll velocity.
 const VELOCITY_WINDOW: Duration = Duration::from_millis(300);
+const QR_STEPS: [&str; 3] =
+    ["1. Open Telegram on your phone", "2. Go to Settings > Devices > Add Device", "3. Scan this image to log in"];
+/// Logical pixels; the code is drawn with 2 image pixels per point for Retina screens.
+const QR_SIZE: f32 = 240.;
+/// Light modules around the code, as the QR standard asks.
+const QR_QUIET_ZONE: usize = 4;
 const API_SETUP_STEPS: [&str; 4] = [
     "Telegram requires every app to have its own API ID. This is a one-time setup:",
     "1. Sign in at my.telegram.org and open API development tools.",
@@ -47,8 +53,14 @@ const API_SETUP_STEPS: [&str; 4] = [
 ];
 
 pub struct Plaingram {
-    client: Box<dyn Backend>,
-    auth: Option<AuthStep>,
+    client: Rc<dyn Backend>,
+    /// Kept to rebuild this view from scratch when TDLib closes.
+    events: Events,
+    pub(crate) auth: Option<AuthStep>,
+    /// The QR code for [`AuthStep::Qr`].
+    qr_code: Option<Arc<RenderImage>>,
+    /// The signed-in user and their phone number.
+    account: Option<(i64, SafeText)>,
     login: Entity<InputState>,
     api_hash: Entity<InputState>,
     compose: Entity<InputState>,
@@ -71,8 +83,8 @@ pub struct Plaingram {
     pub(crate) requested_photos: HashSet<i32>,
     /// How far each photo or file being downloaded has come, from 0 to 1.
     pub(crate) download_progress: HashMap<i32, f32>,
-    pub(crate) viewer: Option<Viewer>,
-    viewer_focus: FocusHandle,
+    pub(crate) overlay: Option<Overlay>,
+    overlay_focus: FocusHandle,
     /// The user whose profile is open beside the chat.
     pub(crate) profile: Option<i64>,
     pub(crate) profiles: HashMap<i64, SafeProfile>,
@@ -85,6 +97,15 @@ pub struct Plaingram {
     error: Option<SafeText>,
     _subscriptions: [Subscription; 4],
     _tasks: [Task<()>; 2],
+}
+
+/// What covers the window below the title bar.
+pub(crate) enum Overlay {
+    Photo(Viewer),
+    /// `confirm_log_out` asks before logging out.
+    Settings {
+        confirm_log_out: bool,
+    },
 }
 
 /// A photo shown over the whole window.
@@ -104,7 +125,7 @@ enum Older {
 }
 
 impl Plaingram {
-    pub fn new(client: Box<dyn Backend>, events: Events, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Rc<dyn Backend>, events: Events, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let login = cx.new(|cx| InputState::new(window, cx));
         let api_hash = cx.new(|cx| InputState::new(window, cx).placeholder("API hash").masked(true));
         let compose = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
@@ -126,8 +147,9 @@ impl Plaingram {
             cx.subscribe_in(&compose, window, on_enter(Self::send)),
             cx.observe(&scroller, |this, _, cx| this.prefetch(cx)),
         ];
-        let events = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(event) = events.recv().await {
+        let receiver = events.clone();
+        let events_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = receiver.recv().await {
                 if this.update_in(cx, |app, window, cx| app.apply(event, window, cx)).is_err() {
                     return;
                 }
@@ -143,7 +165,10 @@ impl Plaingram {
         });
         Self {
             client,
+            events,
             auth: None,
+            qr_code: None,
+            account: None,
             login,
             api_hash,
             compose,
@@ -163,8 +188,8 @@ impl Plaingram {
             photos: HashMap::new(),
             requested_photos: HashSet::new(),
             download_progress: HashMap::new(),
-            viewer: None,
-            viewer_focus: cx.focus_handle(),
+            overlay: None,
+            overlay_focus: cx.focus_handle(),
             profile: None,
             profiles: HashMap::new(),
             account_info: HashMap::new(),
@@ -172,7 +197,7 @@ impl Plaingram {
             scroll_samples: VecDeque::new(),
             error: None,
             _subscriptions: subscriptions,
-            _tasks: [events, clock],
+            _tasks: [events_task, clock],
         }
     }
 
@@ -268,6 +293,7 @@ impl Plaingram {
                 let note = Notification::new().message(format!("Saved to {path}")).placement(Anchor::BottomLeft);
                 window.push_notification(note, cx);
             }
+            Event::Account { user_id, phone } => self.account = Some((user_id, phone)),
             Event::Error(error) => self.error = Some(error),
             Event::History { .. }
             | Event::OlderHistory { .. }
@@ -281,11 +307,22 @@ impl Plaingram {
 
     fn set_auth(&mut self, step: AuthStep, window: &mut Window, cx: &mut Context<Self>) {
         let (placeholder, masked) = match &step {
+            AuthStep::Closed => {
+                *self = Self::new(self.client.clone(), self.events.clone(), window, cx);
+                return;
+            }
+            AuthStep::Qr { link } => {
+                match qr_code(link) {
+                    Ok(image) => self.qr_code = Some(image),
+                    Err(error) => self.show_error(&format!("{error:#}")),
+                }
+                (String::new(), false)
+            }
             AuthStep::ApiCredentials => ("API ID".to_string(), false),
             AuthStep::Phone => ("Phone number, e.g. +15550100".to_string(), false),
             AuthStep::Code => ("Login code".to_string(), false),
             AuthStep::Password { hint } => (format!("Password (hint: {hint})"), true),
-            AuthStep::Ready | AuthStep::Closed => (String::new(), false),
+            AuthStep::Ready => (String::new(), false),
         };
         self.login.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -305,7 +342,7 @@ impl Plaingram {
             Some(AuthStep::Phone) => self.client.submit_phone(value.trim().into()),
             Some(AuthStep::Code) => self.client.submit_code(value.trim().into()),
             Some(AuthStep::Password { .. }) => self.client.submit_password(value),
-            Some(AuthStep::Ready | AuthStep::Closed) | None => {}
+            Some(AuthStep::Qr { .. } | AuthStep::Ready | AuthStep::Closed) | None => {}
         }
     }
 
@@ -410,15 +447,17 @@ impl Plaingram {
         new
     }
 
-    pub(crate) fn open_viewer(&mut self, viewer: Viewer, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_photo(viewer.photo.file_id);
-        self.viewer = Some(viewer);
-        self.viewer_focus.focus(window, cx);
+    pub(crate) fn open_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
+        if let Overlay::Photo(viewer) = &overlay {
+            self.request_photo(viewer.photo.file_id);
+        }
+        self.overlay = Some(overlay);
+        self.overlay_focus.focus(window, cx);
         cx.notify();
     }
 
-    fn close_viewer(&mut self, cx: &mut Context<Self>) {
-        self.viewer = None;
+    fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        self.overlay = None;
         cx.notify();
     }
 
@@ -479,28 +518,38 @@ impl Plaingram {
 
     fn render_login(&self, cx: &mut Context<Self>) -> Div {
         let title = match self.auth {
-            None => "Connecting...",
+            None | Some(AuthStep::Closed) => "Connecting...",
             Some(AuthStep::ApiCredentials) => "Register plaingram with Telegram",
-            Some(AuthStep::Closed) => "Session closed",
+            Some(AuthStep::Qr { .. }) => "Scan From Mobile Telegram",
             _ => "Sign in",
         };
         let setup = matches!(self.auth, Some(AuthStep::ApiCredentials));
+        let qr = matches!(self.auth, Some(AuthStep::Qr { .. }));
         let asking = setup || matches!(self.auth, Some(AuthStep::Phone | AuthStep::Code | AuthStep::Password { .. }));
         let input = |state: &Entity<InputState>| div().w(px(320.)).child(Input::new(state));
+        let steps = |steps: &[&'static str]| {
+            v_flex()
+                .gap_1()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .children(steps.iter().map(|s| div().child(*s)))
+        };
+        let switch = |id: &'static str, label: &'static str, log_in: fn(&dyn Backend)| {
+            Button::new(id).link().label(label).on_click(cx.listener(move |this, _, _, _| log_in(&*this.client)))
+        };
         v_flex()
             .flex_1()
             .items_center()
             .justify_center()
             .gap_3()
+            .when(qr, |el| {
+                el.children(self.qr_code.clone().map(|code| img(ImageSource::Render(code)).size(px(QR_SIZE))))
+            })
             .child(div().text_xl().child(title))
-            .when(setup, |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(API_SETUP_STEPS.map(|step| div().child(step))),
-                )
+            .when(setup, |el| el.child(steps(&API_SETUP_STEPS)))
+            .when(qr, |el| {
+                el.child(steps(&QR_STEPS))
+                    .child(switch("use-phone", "Log in using phone number", |c| c.log_in_with_phone()))
             })
             .when(asking, |el| el.child(input(&self.login)))
             .when(setup, |el| el.child(input(&self.api_hash)))
@@ -511,6 +560,9 @@ impl Plaingram {
                         .label("Continue")
                         .on_click(cx.listener(|this, _, window, cx| this.submit_login(window, cx))),
                 )
+            })
+            .when(matches!(self.auth, Some(AuthStep::Phone | AuthStep::Code)), |el| {
+                el.child(switch("use-qr", "Log in using QR code", |c| c.log_in_with_qr()))
             })
     }
 
@@ -670,7 +722,9 @@ impl Plaingram {
                             .on_click({
                                 let viewer = viewer.clone();
                                 move |_, window, cx| {
-                                    open.update(cx, |this, cx| this.open_viewer(viewer.clone(), window, cx))
+                                    open.update(cx, |this, cx| {
+                                        this.open_overlay(Overlay::Photo(viewer.clone()), window, cx)
+                                    })
                                 }
                             })
                             .context_menu(move |menu, _, _| {
@@ -823,15 +877,12 @@ impl Plaingram {
                         .id("profile-photo")
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_viewer(Viewer { photo, save_as: None }, window, cx)
+                            this.open_overlay(Overlay::Photo(Viewer { photo, save_as: None }), window, cx)
                         }))
                         .child(self.render_photo(&photo, PROFILE_PHOTO_WIDTH, cx)),
                 )
             })
-            .when_some(user, |el, user| {
-                el.child(name_label(&user.name, cx))
-                    .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
-            })
+            .children(user.map(|user| identity(user, cx)))
             .child(div().text_xs().text_color(muted).child(status.chain(labels.into_iter().copied()).collect::<Vec<_>>().join(" · ")))
             .children(alarms.into_iter().map(|label| warning(format!("Telegram marks this account {label}"), cx)))
             .children(self.lookalikes(user_id).into_iter().map(|contact| {
@@ -839,12 +890,7 @@ impl Plaingram {
                 warning(format!("looks like your contact {} ({handle})", contact.name), cx)
             }))
             .when_some(profile.filter(|p| !p.bio.is_empty()), |el, p| el.child(safe_text(&p.bio, cx)))
-            .children(facts.into_iter().map(|(label, value)| {
-                h_flex()
-                    .gap_2()
-                    .child(div().w(px(150.)).flex_none().text_color(muted).child(label))
-                    .child(div().flex_1().min_w_0().child(value))
-            }))
+            .children(facts.into_iter().map(|(label, value)| fact(label, value, muted)))
             .when(info.is_none(), |el| {
                 el.child(div().text_xs().text_color(muted).child(
                     "Telegram shares registration date, phone country and renames only for people who message you first.",
@@ -852,50 +898,94 @@ impl Plaingram {
             })
     }
 
-    /// A photo over the whole window below the title bar, with Close, and Download for chat photos.
-    fn render_viewer(&self, viewer: &Viewer, cx: &mut Context<Self>) -> Stateful<Div> {
-        let photo = viewer.photo;
+    /// Covers the window below the title bar until Close or Escape. Chat photos also get Download.
+    fn render_overlay(&self, overlay: &Overlay, cx: &mut Context<Self>) -> Stateful<Div> {
+        let (download, content) = match overlay {
+            Overlay::Photo(viewer) => {
+                let photo = viewer.photo;
+                let download = viewer.save_as.clone().map(|name| {
+                    Button::new("download-photo")
+                        .label("Download")
+                        .on_click(cx.listener(move |this, _, _, _| this.client.save_photo(photo.file_id, name.clone())))
+                });
+                let image = match self.photos.get(&photo.file_id) {
+                    Some(image) => img(ImageSource::Render(image.clone()))
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                    None => self.render_photo(&photo, PHOTO_MAX_WIDTH, cx),
+                };
+                (download, div().flex_1().min_h_0().p_4().flex().items_center().justify_center().child(image))
+            }
+            Overlay::Settings { confirm_log_out } => (None, self.render_settings(*confirm_log_out, cx)),
+        };
         div()
-            .id("viewer")
+            .id("overlay")
             .absolute()
             .inset_0()
             .occlude()
             .flex()
             .flex_col()
             .bg(cx.theme().background)
-            .track_focus(&self.viewer_focus)
+            .track_focus(&self.overlay_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
-                    this.close_viewer(cx);
+                    this.close_overlay(cx);
                 }
             }))
             .child(
-                h_flex()
-                    .p_2()
-                    .gap_2()
-                    .justify_end()
-                    .when_some(viewer.save_as.clone(), |el, name| {
-                        el.child(Button::new("download-photo").label("Download").on_click(
-                            cx.listener(move |this, _, _, _| this.client.save_photo(photo.file_id, name.clone())),
-                        ))
-                    })
-                    .child(
-                        Button::new("close-viewer")
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))),
-                    ),
-            )
-            .child(
-                div().flex_1().min_h_0().p_4().flex().items_center().justify_center().child(
-                    match self.photos.get(&photo.file_id) {
-                        Some(image) => img(ImageSource::Render(image.clone()))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain)
-                            .into_any_element(),
-                        None => self.render_photo(&photo, PHOTO_MAX_WIDTH, cx),
-                    },
+                h_flex().p_2().gap_2().justify_end().children(download).child(
+                    Button::new("close-overlay")
+                        .label("Close")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_overlay(cx))),
                 ),
             )
+            .child(content)
+    }
+
+    fn render_settings(&self, confirm_log_out: bool, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let settings = |confirm_log_out| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.overlay = Some(Overlay::Settings { confirm_log_out });
+                cx.notify();
+            })
+        };
+        let log_out = match confirm_log_out {
+            false => h_flex()
+                .child(Button::new("log-out").danger().label("Log out").on_click(settings(true)))
+                .into_any_element(),
+            true => v_flex()
+                .gap_2()
+                .child("Log out? plaingram deletes its copy of your chats from this computer. They stay on Telegram.")
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Button::new("confirm-log-out").danger().label("Log out").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.client.log_out();
+                                this.close_overlay(cx);
+                            },
+                        )))
+                        .child(Button::new("cancel-log-out").label("Cancel").on_click(settings(false))),
+                )
+                .into_any_element(),
+        };
+        let account = self.account.as_ref();
+        v_flex().flex_1().min_h_0().items_center().p_4().child(
+            v_flex()
+                .w(px(PROFILE_WIDTH))
+                .gap_3()
+                .child(div().text_xl().child("Settings"))
+                .children(account.and_then(|(user_id, _)| self.users.get(user_id)).map(|user| identity(user, cx)))
+                .child(fact(
+                    "Phone",
+                    account.map_or_else(|| "loading...".into(), |(_, phone)| phone.to_string()),
+                    muted,
+                ))
+                .child(fact("Version", env!("CARGO_PKG_VERSION").into(), muted))
+                .child(log_out),
+        )
     }
 
     fn render_photo(&self, photo: &PhotoRef, max_width: f32, cx: &App) -> AnyElement {
@@ -953,7 +1043,18 @@ impl Render for Plaingram {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
-            .child(TitleBar::new().child(div().text_sm().text_color(cx.theme().muted_foreground).child("plaingram")))
+            .child(
+                TitleBar::new().child(div().text_sm().text_color(cx.theme().muted_foreground).child("plaingram")).when(
+                    self.auth == Some(AuthStep::Ready),
+                    |el| {
+                        el.child(div().pr_2().child(Button::new("settings").ghost().label("Settings").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.open_overlay(Overlay::Settings { confirm_log_out: false }, window, cx)
+                            }),
+                        )))
+                    },
+                ),
+            )
             .when_some(self.error.as_ref(), |el, error| {
                 el.child(
                     h_flex()
@@ -974,9 +1075,46 @@ impl Render for Plaingram {
                     .min_h_0()
                     .relative()
                     .child(body)
-                    .when_some(self.viewer.as_ref(), |el, viewer| el.child(self.render_viewer(viewer, cx))),
+                    .when_some(self.overlay.as_ref(), |el, overlay| el.child(self.render_overlay(overlay, cx))),
             )
     }
+}
+
+/// A name and @handle, each with its badges.
+fn identity(user: &SafeUser, cx: &App) -> Div {
+    v_flex()
+        .gap_1()
+        .child(name_label(&user.name, cx))
+        .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
+}
+
+/// A labelled value in the profile or settings.
+fn fact(label: &'static str, value: String, muted: Hsla) -> Div {
+    h_flex()
+        .gap_2()
+        .child(div().w(px(150.)).flex_none().text_color(muted).child(label))
+        .child(div().flex_1().min_w_0().child(value))
+}
+
+fn qr_code(link: &str) -> Result<Arc<RenderImage>> {
+    render_image(qr_pixels(link)?)
+}
+
+/// `link` as black modules on white, `2 * QR_SIZE` pixels square.
+fn qr_pixels(link: &str) -> Result<DecodedImage> {
+    let code = qrcode::QrCode::new(link)?;
+    let (modules, colors) = (code.width(), code.to_colors());
+    let (side, total) = (2 * QR_SIZE as usize, modules + 2 * QR_QUIET_ZONE);
+    let in_code = QR_QUIET_ZONE..QR_QUIET_ZONE + modules;
+    let dark = |x: usize, y: usize| {
+        let (x, y) = (x * total / side, y * total / side);
+        in_code.contains(&x)
+            && in_code.contains(&y)
+            && colors[(y - QR_QUIET_ZONE) * modules + x - QR_QUIET_ZONE] == qrcode::Color::Dark
+    };
+    let bgra =
+        (0..side * side).flat_map(|i| if dark(i % side, i / side) { [0, 0, 0, 255] } else { [255; 4] }).collect();
+    Ok(DecodedImage { width: u32::try_from(side)?, height: u32::try_from(side)?, bgra })
 }
 
 fn render_image(image: DecodedImage) -> Result<Arc<RenderImage>> {
@@ -1061,7 +1199,20 @@ fn local(date: i32) -> DateTime<Local> {
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::{skeleton, timestamp};
+    use super::{qr_pixels, skeleton, timestamp};
+
+    /// Decodes the drawn code the way a phone camera would, so a wrong module size or quiet zone shows up here.
+    #[test]
+    fn qr_codes_scan_back_to_the_login_link() {
+        let link = "tg://login?token=AQKm8fNnZrbRgP0x3sGg9lHn2vYq7kHbXzJc1tW4eQdUoLsA-_";
+        let image = qr_pixels(link).unwrap();
+        let (width, height) = (image.width as usize, image.height as usize);
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| image.bgra[(y * width + x) * 4]);
+        let grids = prepared.detect_grids();
+        assert_eq!(grids.len(), 1);
+        assert_eq!(grids[0].decode().unwrap().1, link);
+    }
 
     #[test]
     fn timestamps_are_relative_for_a_day_then_absolute() {

@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,9 +7,9 @@ use gpui_kit::{
     AppContext as _, Entity, HeadlessAppContext, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
     MouseUpEvent, PlatformInput, WindowHandle, point, px, size,
 };
-use tg_core::{Demo, SafeContent};
+use tg_core::{AuthStep, Demo, SafeContent};
 
-use crate::app::{Plaingram, Viewer};
+use crate::app::{Overlay, Plaingram, Viewer};
 
 const SCREENSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/screenshots");
 const GROUP_CHAT: i64 = 11;
@@ -88,7 +89,7 @@ fn open_demo(cx: &mut HeadlessAppContext, signed_in: bool) -> (WindowHandle<Root
     let mut app = None;
     let window = cx
         .open_window(size(px(1100.), px(720.)), |window, cx| {
-            let view = cx.new(|cx| Plaingram::new(Box::new(demo), events, window, cx));
+            let view = cx.new(|cx| Plaingram::new(Rc::new(demo), events, window, cx));
             app = Some(view.clone());
             cx.new(|cx| Root::new(view, window, cx))
         })
@@ -239,8 +240,10 @@ fn photos_open_full_window_and_escape_closes_them() {
         [("viewer", photos[0].unwrap(), Some("photo.jpg".to_owned())), ("viewer-profile", photos[1].unwrap(), None)]
     {
         let viewer = Viewer { photo, save_as };
-        cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.open_viewer(viewer, window, cx)))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            app.update(cx, |app, cx| app.open_overlay(Overlay::Photo(viewer), window, cx))
+        })
+        .unwrap();
         draw(&mut cx, window);
         cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/{name}.png")).unwrap();
         let escape = KeyDownEvent {
@@ -251,7 +254,7 @@ fn photos_open_full_window_and_escape_closes_them() {
         cx.update_window(window.into(), |_, window, cx| _ = window.dispatch_event(PlatformInput::KeyDown(escape), cx))
             .unwrap();
         cx.run_until_parked();
-        assert!(cx.update(|cx| app.read(cx).viewer.is_none()), "Escape closes the {name}");
+        assert!(cx.update(|cx| app.read(cx).overlay.is_none()), "Escape closes the {name}");
     }
 }
 
@@ -279,10 +282,60 @@ fn right_clicking_a_file_offers_to_download_it() {
         })
     });
     let viewer = Viewer { photo: photo.unwrap(), save_as: Some("photo.jpg".into()) };
-    cx.update_window(window.into(), |_, window, cx| app.update(cx, |app, cx| app.open_viewer(viewer, window, cx)))
-        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        app.update(cx, |app, cx| app.open_overlay(Overlay::Photo(viewer), window, cx))
+    })
+    .unwrap();
     draw(&mut cx, window);
     click(&mut cx, window, 990., 54.);
     draw(&mut cx, window);
     cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/saved.png")).unwrap();
+}
+
+fn screenshot(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, name: &str) {
+    draw(cx, window);
+    cx.capture_screenshot(window.into()).unwrap().save(format!("{SCREENSHOT_DIR}/{name}.png")).unwrap();
+}
+
+/// Sign-in shows a QR code first, like Telegram's own apps; links switch to a phone number and back.
+#[test]
+fn signing_in_starts_with_a_qr_code_and_can_switch_to_a_phone_number() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, false);
+    draw(&mut cx, window);
+    click(&mut cx, window, 550., 485.);
+    let auth = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).auth.clone());
+    assert!(matches!(auth(&mut cx), Some(AuthStep::Qr { .. })), "the QR code comes first");
+    screenshot(&mut cx, window, "login-qr");
+    click(&mut cx, window, 550., 560.);
+    assert_eq!(auth(&mut cx), Some(AuthStep::Phone), "the link switches to a phone number");
+    screenshot(&mut cx, window, "login-phone");
+    click(&mut cx, window, 550., 434.);
+    assert!(matches!(auth(&mut cx), Some(AuthStep::Qr { .. })), "and back to the QR code");
+}
+
+/// Settings shows the account; logging out asks first, then forgets the chats and shows the QR code.
+#[test]
+fn logging_out_from_settings_returns_to_the_qr_code() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    click(&mut cx, window, 1053., 16.);
+    screenshot(&mut cx, window, "settings");
+    click(&mut cx, window, 385., 268.);
+    screenshot(&mut cx, window, "settings-log-out");
+    click(&mut cx, window, 458., 342.);
+    let overlay = |cx: &mut HeadlessAppContext, confirm: bool| {
+        cx.update(|cx| matches!(app.read(cx).overlay, Some(Overlay::Settings { confirm_log_out }) if confirm_log_out == confirm))
+    };
+    assert!(overlay(&mut cx, false), "Cancel keeps the account");
+    click(&mut cx, window, 385., 268.);
+    assert!(overlay(&mut cx, true));
+    click(&mut cx, window, 384., 342.);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(matches!(app.auth, Some(AuthStep::Qr { .. })), "a fresh sign-in starts at the QR code");
+        assert!(app.messages.is_empty() && app.overlay.is_none(), "nothing of the old account stays on screen");
+    });
 }

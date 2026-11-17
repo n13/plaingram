@@ -38,6 +38,8 @@ const TOPICS: [(i32, &str); 11] = [
     (11, "Faucet"),
 ];
 const PHOTO: PhotoRef = PhotoRef { file_id: 1, width: 640, height: 427 };
+/// Shaped like the links TDLib sends, so the demo QR code is as dense as a real one.
+const QR_LINK: &str = "tg://login?token=AQKm8fNnZrbRgP0x3sGg9lHn2vYq7kHbXzJc1tW4eQdUoLsA";
 
 /// Offline backend with fixed fixtures, for UI development and screenshots. All text goes through [`sanitize`].
 pub struct Demo {
@@ -58,7 +60,9 @@ impl Demo {
 
     fn sign_in(&self) {
         self.emit(Event::Auth(AuthStep::Ready));
+        self.emit(Event::Account { user_id: ME, phone: sanitize("+15550100") });
         for (id, name, username, is_contact) in [
+            (ME, "Sam Rivera", Some("samrivera"), false),
             (2, "Alice Smith", Some("alice_smith"), true),
             (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
             (4, "Bob Jones", Some("bobj"), true),
@@ -117,6 +121,15 @@ impl Demo {
 
 impl Backend for Demo {
     fn submit_api_credentials(&self, _: String, _: String) {
+        self.log_in_with_qr();
+    }
+
+    fn log_in_with_qr(&self) {
+        self.emit(Event::Auth(AuthStep::Qr { link: QR_LINK.into() }));
+    }
+
+    fn log_in_with_phone(&self) {
+        self.emit(Event::Auth(AuthStep::Closed));
         self.emit(Event::Auth(AuthStep::Phone));
     }
 
@@ -130,6 +143,11 @@ impl Backend for Demo {
 
     fn submit_password(&self, _: String) {
         self.sign_in();
+    }
+
+    fn log_out(&self) {
+        self.emit(Event::Auth(AuthStep::Closed));
+        self.log_in_with_qr();
     }
 
     fn open_chat(&self, chat_id: i64, topic: Option<i32>) {
