@@ -160,9 +160,20 @@ pub fn sanitize(raw: &str) -> SafeText {
 }
 
 /// Like [`sanitize`] for names of people and chats, but the first letter decides the alphabet of the whole name,
-/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too.
+/// so a lone foreign word such as the `Ω` in `Alex Ω` is replaced too. A name with a word that mixes cases, such as
+/// the capital `I` posing as `l` in `AIice`, shows in lowercase, where `i` and `l` differ.
 pub fn sanitize_name(raw: &str) -> SafeText {
-    sanitize_with(raw, false)
+    match mixes_case(raw) {
+        true => sanitize_with(&raw.to_lowercase(), false),
+        false => sanitize_with(raw, false),
+    }
+}
+
+/// Some word, a run of letters, has a capital after its first letter as well as a small letter, as in `AIice`, `ADMlN`
+/// or `PayPal`; capitalized and all-caps words do not.
+fn mixes_case(raw: &str) -> bool {
+    raw.split(|c: char| !c.is_alphabetic())
+        .any(|word| word.chars().any(char::is_lowercase) && word.chars().skip(1).any(char::is_uppercase))
 }
 
 fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
@@ -277,6 +288,25 @@ mod tests {
         assert_eq!(sanitize_name("\u{0410}lice Smith").to_string(), "\u{0410}???? ?????");
         assert_eq!(sanitize_name("Андрей Смоляков \u{1F4A6}").to_string(), "Андрей Смоляков \u{1F4A6}");
         assert_eq!(Reason::MixedAlphabets { letter: "Greek", first: "Latin" }.to_string(), "Greek in Latin text");
+    }
+
+    #[test]
+    fn names_with_a_word_that_mixes_cases_show_in_lowercase() {
+        for (raw, shown) in [
+            ("AIice Smith", "aiice smith"),
+            ("ADMlN", "admln"),
+            ("aLICE", "alice"),
+            ("PayPal Support", "paypal support"),
+            ("AIice_smith", "aiice_smith"),
+            ("АндрЕй", "андрей"),
+            ("Alice Smith", "Alice Smith"),
+            ("ADMIN", "ADMIN"),
+            ("Jean-Luc O'Brien", "Jean-Luc O'Brien"),
+            ("Андрей ПЕТРОВ", "Андрей ПЕТРОВ"),
+        ] {
+            assert_eq!(sanitize_name(raw).to_string(), shown, "{raw}");
+        }
+        assert_eq!(sanitize("AIice").to_string(), "AIice", "messages keep their case");
     }
 
     #[test]

@@ -726,3 +726,4 @@ fn cli_proportional_draws_high_legibility_letters() {
     let plain = pixels(THEMES[0].font_features());
     assert_ne!(plain, pixels(Palette::named("CLI proportional").unwrap().font_features()));
 }
+
