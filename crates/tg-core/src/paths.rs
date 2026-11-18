@@ -68,10 +68,16 @@ fn save_new(dir: &Path, name: &str, contents: &mut impl Read) -> Result<PathBuf>
             n => format!("{stem} ({n}){extension}"),
         });
         match OpenOptions::new().write(true).create_new(true).open(&path) {
+            // Marked before anything is written, and removed if either step fails, so no unmarked file is left behind.
             Ok(mut file) => {
-                std::io::copy(contents, &mut file).with_context(|| format!("cannot write {}", path.display()))?;
-                quarantine(&path)?;
-                return Ok(path);
+                let saved = quarantine(&path).and_then(|()| {
+                    std::io::copy(contents, &mut file).with_context(|| format!("cannot write {}", path.display()))
+                });
+                if saved.is_err() {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                }
+                return saved.map(|_| path);
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
@@ -118,6 +124,31 @@ mod tests {
         assert_eq!(save(".hidden"), dir.join("hidden"));
         assert_eq!(save(""), dir.join("file"));
         assert_eq!(std::fs::read_to_string(dir.join("report (1).zip")).unwrap(), "data");
+        #[cfg(target_os = "macos")]
+        assert!(
+            std::process::Command::new("/usr/bin/xattr")
+                .args(["-p", "com.apple.quarantine"])
+                .arg(dir.join("report.zip"))
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_file() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("connection lost"))
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("plaingram-failed-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(save_new(&dir, "report.zip", &mut Broken).is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
