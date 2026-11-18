@@ -27,7 +27,7 @@ use gpui_kit::*;
 use tg_core::{
     AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, ReactionId,
     SafeAccountInfo, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic,
-    SafeUser, Sender, is_allowed, sanitize,
+    SafeUser, Sender, Skeleton, is_allowed, sanitize,
 };
 
 use crate::safe_text::{name_label, safe_text, warning};
@@ -837,11 +837,11 @@ impl Plaingram {
     /// Contacts whose name or handle looks like the name or handle of `user_id`, when that user is not a contact.
     pub(crate) fn lookalikes(&self, user_id: i64) -> Vec<&SafeUser> {
         let Some(user) = self.users.get(&user_id).filter(|user| !user.is_contact) else { return Vec::new() };
-        let skeletons = |u: &SafeUser| -> Vec<String> {
+        let skeletons = |u: &SafeUser| -> Vec<Skeleton> {
             [Some(&u.name), u.username.as_ref()]
                 .into_iter()
                 .flatten()
-                .map(|text| skeleton(&text.to_string()))
+                .map(SafeText::skeleton)
                 .filter(|s| !s.is_empty())
                 .collect()
         };
@@ -1920,19 +1920,6 @@ fn age(date: i32, now: DateTime<Local>) -> String {
     }
 }
 
-/// Folds case, punctuation and look-alike characters, so "a1ice_smith_" and "Alice Smith" compare equal.
-fn skeleton(text: &str) -> String {
-    let text = text.to_lowercase().replace("rn", "m");
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| match c {
-            '0' => 'o',
-            '1' | 'i' => 'l',
-            c => c,
-        })
-        .collect()
-}
-
 fn month_year(month: u32, year: i32) -> String {
     NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1 to 12").format("%B %Y").to_string()
 }
@@ -1945,7 +1932,7 @@ fn local(date: i32) -> DateTime<Local> {
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::{qr_pixels, skeleton, timestamp};
+    use super::{qr_pixels, timestamp};
 
     /// Decodes the drawn code the way a phone camera would, so a wrong module size or quiet zone shows up here.
     #[test]
@@ -1972,15 +1959,5 @@ mod tests {
         assert_eq!(ago(86399), "23h ago");
         let absolute = ago(86400);
         assert!(absolute.starts_with("2027-01-1") && absolute.len() == 16, "{absolute}");
-    }
-
-    #[test]
-    fn skeletons_fold_look_alike_names_and_handles() {
-        assert_eq!(skeleton("Alice Smith"), skeleton("alice_smith_"));
-        assert_eq!(skeleton("a1ice.smith"), skeleton("AIice Smith"));
-        assert_eq!(skeleton("B0b Jones"), skeleton("bobjones"));
-        assert_eq!(skeleton("Mike"), skeleton("rnike"));
-        assert_ne!(skeleton("Alice Smith"), skeleton("Alice Smyth"));
-        assert_eq!(skeleton("\u{1F60A} ???"), "");
     }
 }

@@ -17,4 +17,4 @@ pub use model::{
     SafeContent, SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
 pub use paths::{log_file, settings_file};
-pub use text::{Reason, SafeText, Segment, code_points, is_allowed, sanitize};
+pub use text::{Reason, SafeText, Segment, Skeleton, code_points, is_allowed, sanitize};
