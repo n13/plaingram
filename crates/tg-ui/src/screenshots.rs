@@ -235,6 +235,15 @@ fn profile_fits_beside_a_forum_with_many_topics() {
     assert_eq!(cx.update(|cx| app.read(cx).profile), None);
 }
 
+fn type_in_switcher(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, app: &Entity<Plaingram>, text: &str) {
+    cx.update_window(window.into(), |_, window, cx| {
+        let switcher = app.read(cx).switcher.clone().unwrap();
+        switcher.update(cx, |switcher, cx| switcher.set_query(text, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
 fn key(cx: &mut HeadlessAppContext, window: WindowHandle<Root>, keystroke: &'static str) {
     let keystroke = Keystroke::parse(keystroke).unwrap();
     let event = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
@@ -437,18 +446,10 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     assert!(ranked(&mut cx, "xyz").is_empty());
 
     let switcher_open = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).switcher.is_some());
-    let query = |cx: &mut HeadlessAppContext, text: &str| {
-        cx.update_window(window.into(), |_, window, cx| {
-            let switcher = app.read(cx).switcher.clone().unwrap();
-            switcher.update(cx, |switcher, cx| switcher.set_query(text, window, cx));
-        })
-        .unwrap();
-        cx.run_until_parked();
-    };
     draw(&mut cx, window);
     key(&mut cx, window, "cmd-k");
     assert!(switcher_open(&mut cx));
-    query(&mut cx, "al");
+    type_in_switcher(&mut cx, window, &app, "al");
     screenshot(&mut cx, window, "switcher");
     key(&mut cx, window, "down");
     key(&mut cx, window, "enter");
@@ -457,7 +458,7 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     assert_eq!(ranked(&mut cx, "")[..2], [PAYPAL, FORUM], "the chat just opened comes first");
 
     key(&mut cx, window, "cmd-k");
-    query(&mut cx, "rust");
+    type_in_switcher(&mut cx, window, &app, "rust");
     key(&mut cx, window, "escape");
     assert!(!switcher_open(&mut cx), "one Escape closes, even with text typed");
     key(&mut cx, window, "cmd-k");
@@ -473,6 +474,31 @@ fn command_k_jumps_to_chats_by_name_and_recency() {
     click(&mut cx, window, 990., 550.);
     assert!(!switcher_open(&mut cx), "a click outside closes");
     assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(SAVED_MESSAGES));
+}
+
+/// Typing in the switcher also finds people to start a chat with: contacts first, then, from four characters on,
+/// strangers by public username, marked as not a contact. Picking one opens a new chat with them. The search button in the
+/// title bar opens the switcher too.
+#[test]
+fn the_switcher_finds_people_to_start_a_chat_with() {
+    const BOB_CONTACT: i64 = 4;
+    const BOB_STRANGER: i64 = 6;
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    let ranked = |cx: &mut HeadlessAppContext, query: &str| cx.update(|cx| app.read(cx).switcher_chats(query));
+    draw(&mut cx, window);
+    click(&mut cx, window, 1040., 16.);
+    type_in_switcher(&mut cx, window, &app, "bob");
+    draw(&mut cx, window);
+    assert_eq!(ranked(&mut cx, "bob"), [BOB, BOB_CONTACT], "the secret chat with Bob, then a new chat with him");
+    type_in_switcher(&mut cx, window, &app, "bob j");
+    draw(&mut cx, window);
+    assert_eq!(ranked(&mut cx, "bob j"), [BOB, BOB_CONTACT, BOB_STRANGER], "four characters also find strangers");
+    screenshot(&mut cx, window, "switcher-people");
+    key(&mut cx, window, "down");
+    key(&mut cx, window, "down");
+    key(&mut cx, window, "enter");
+    assert_eq!(cx.update(|cx| app.read(cx).open_chat), Some(BOB_STRANGER));
 }
 
 /// Right-clicking a message offers Delete, which asks how to delete it before removing it from the chat.

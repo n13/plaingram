@@ -24,6 +24,8 @@ const FORUM: i64 = 15;
 const PAYPAL: i64 = 13;
 const SAVED_MESSAGES: i64 = 16;
 const DEMO_SPACING: i32 = 5 * 3600;
+/// How long a query must be before Telegram also searches public usernames.
+const PUBLIC_SEARCH_LENGTH: usize = 4;
 const GENERAL_TOPIC: i32 = 1;
 /// Messages in the forum's General topic, enough to scroll back through.
 const GENERAL_SIZE: i64 = 1000;
@@ -70,14 +72,7 @@ impl Demo {
     fn sign_in(&self) {
         self.emit(Event::Auth(AuthStep::Ready));
         self.emit(Event::Account { user_id: ME, phone: sanitize("+15550100") });
-        for (id, name, username, is_contact) in [
-            (ME, "Sam Rivera", Some("samrivera"), false),
-            (2, "Alice Smith", Some("alice_smith"), true),
-            (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
-            (4, "Bob Jones", Some("bobj"), true),
-            (6, "Bob Jones", Some("bobjones_support"), false),
-            (5, "P\u{0430}ypal Support", None, false),
-        ] {
+        for (id, name, username, is_contact) in PEOPLE {
             self.emit(Event::User(SafeUser {
                 id,
                 name: sanitize_name(name),
@@ -102,16 +97,7 @@ impl Demo {
             ],
             main_position: 0,
         });
-        let (main, friends, groups) = (ChatListId::Main, ChatListId::Folder(1), ChatListId::Folder(2));
-        for (id, kind, title, unread, order, lists) in [
-            (SAVED_MESSAGES, ChatKind::Private { user_id: ME }, "Sam Rivera", 0, 7, vec![main]),
-            (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 1, 6, vec![main, friends]),
-            (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 3, 5, vec![main, friends, groups]),
-            (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 0, 4, vec![main, friends]),
-            (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 1, 3, vec![ChatListId::Archive]),
-            (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 0, 2, vec![main, groups]),
-            (FORUM, ChatKind::Forum, "Rust devs", 128, 1, vec![main, groups]),
-        ] {
+        for (id, kind, title, unread, order, lists) in chats() {
             self.emit(Event::Chat(SafeChat { id, kind, title: sanitize_name(title), unread }));
             for list in lists {
                 self.emit(Event::ChatPosition { chat_id: id, list, order });
@@ -233,6 +219,36 @@ impl Backend for Demo {
         let message_ids =
             history(chat_id, None).iter().filter(|m| m.sender == Sender::User(user_id)).map(|m| m.id).collect();
         self.emit(Event::MessagesDeleted { chat_id, message_ids });
+    }
+
+    /// Contacts whose name or username contains the query, then, from four characters on, others with a username, as
+    /// Telegram finds people by public username. Someone without a private chat gets one, numbered as they are.
+    fn search_people(&self, query: String) {
+        let lowercase = query.to_lowercase();
+        let public = query.chars().count() >= PUBLIC_SEARCH_LENGTH;
+        let mut found: Vec<_> = PEOPLE
+            .into_iter()
+            .filter(|&(id, name, username, is_contact)| {
+                let named =
+                    name.to_lowercase().contains(&lowercase) || username.is_some_and(|u| u.contains(&lowercase));
+                id != ME && named && (is_contact || public && username.is_some())
+            })
+            .collect();
+        found.sort_by_key(|&(.., is_contact)| !is_contact);
+        let chats = found
+            .into_iter()
+            .map(|(user_id, name, ..)| {
+                let kind = ChatKind::Private { user_id };
+                chats().into_iter().find(|chat| chat.1 == kind).map_or_else(
+                    || {
+                        self.emit(Event::Chat(SafeChat { id: user_id, kind, title: sanitize_name(name), unread: 0 }));
+                        user_id
+                    },
+                    |chat| chat.0,
+                )
+            })
+            .collect();
+        self.emit(Event::People { query, chats });
     }
 
     fn load_available_reactions(&self, chat_id: i64, message_id: i64) {
@@ -372,6 +388,32 @@ fn general(before: i64, count: i64) -> Vec<SafeMessage> {
 fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeContent, date: i32) -> SafeMessage {
     let reactions = reactions(chat_id, id);
     SafeMessage { id, chat_id, sender: Sender::User(from), date, outgoing: from == ME, topic, content, reactions }
+}
+
+/// Everyone the demo knows: id, name, @username and whether they are a contact.
+const PEOPLE: [(i64, &str, Option<&str>, bool); 6] = [
+    (ME, "Sam Rivera", Some("samrivera"), false),
+    (2, "Alice Smith", Some("alice_smith"), true),
+    (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
+    (4, "Bob Jones", Some("bobj"), true),
+    (6, "Bob Jones", Some("bobjones_support"), false),
+    (5, "P\u{0430}ypal Support", None, false),
+];
+
+/// A demo chat: id, kind, title, unread messages, order and the lists it is in.
+type DemoChat = (i64, ChatKind, &'static str, i32, i64, Vec<ChatListId>);
+
+fn chats() -> [DemoChat; 7] {
+    let (main, friends, groups) = (ChatListId::Main, ChatListId::Folder(1), ChatListId::Folder(2));
+    [
+        (SAVED_MESSAGES, ChatKind::Private { user_id: ME }, "Sam Rivera", 0, 7, vec![main]),
+        (10, ChatKind::Private { user_id: 2 }, "Alice Smith", 1, 6, vec![main, friends]),
+        (HIKING, ChatKind::Group, "Weekend hiking \u{1F525}", 3, 5, vec![main, friends, groups]),
+        (12, ChatKind::Secret { user_id: 4 }, "Bob Jones", 0, 4, vec![main, friends]),
+        (PAYPAL, ChatKind::Private { user_id: 5 }, "P\u{0430}ypal Support", 1, 3, vec![ChatListId::Archive]),
+        (14, ChatKind::Group, "Family \u{2764}\u{FE0F}", 0, 2, vec![main, groups]),
+        (FORUM, ChatKind::Forum, "Rust devs", 128, 1, vec![main, groups]),
+    ]
 }
 
 /// What every demo message may be reacted with.

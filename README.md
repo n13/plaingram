@@ -4,7 +4,7 @@ Unofficial, super minimal Telegram client for Mac/Linux; Security first.
 
 Design goals:
 - Text and images, groups, and folders work
-- Cmd-K (Ctrl-K on Linux) jumps to any chat: names that start with what you type come first, then names that contain it, each in the order you last opened them
+- Cmd-K (Ctrl-K on Linux) jumps to any chat: names that start with what you type come first, then names that contain it, each in the order you last opened them. It also starts new chats: after your chats it lists contacts whose name or username matches, then, from four characters on, people whose public @username or name matches, as Telegram's apps do. Strangers show as `not a contact`, and bots, groups and channels are left out. The search button in the title bar opens it too.
 - Starts in the chat you had open, Cmd-H hides and Cmd-Q quits
 - Unread counts beside each chat, from Telegram. A message counts as read only once it is on screen while plaingram is in front
 - Reduce attack surface by removing mini apps, bots, animations, etc

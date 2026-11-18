@@ -10,7 +10,7 @@ use base64::prelude::{BASE64_STANDARD, Engine};
 use td::enums::{
     AuthorizationState, AvailableReactions, BasicGroup, Chat, ChatActionBar, ChatList, ChatMemberStatus, ChatPhotos,
     ChatType, Chats, File, ForumTopics, InputFile, InputMessageContent, Message, MessageProperties, MessageReplyTo,
-    MessageSender, MessageTopic, Messages, ReactionType, Supergroup, Update, User, UserFullInfo,
+    MessageSender, MessageTopic, Messages, ReactionType, Supergroup, Update, User, UserFullInfo, Users,
 };
 use td::{functions, types};
 use tokio::runtime::Runtime;
@@ -23,6 +23,8 @@ use crate::text::{is_allowed, sanitize, sanitize_name};
 
 const HISTORY_SIZE: usize = 50;
 const OLDER_SIZE: usize = 100;
+/// How many contacts a search for people lists at most.
+const CONTACTS_FOUND: i32 = 20;
 /// How many reactions TDLib counts as the top row of a message's available reactions.
 const REACTIONS_PER_ROW: i32 = 8;
 /// How many recently opened chats TDLib keeps.
@@ -214,6 +216,31 @@ impl Backend for Client {
         self.spawn(async move {
             this.ensure_allowed(chat_id)?;
             functions::leave_chat(chat_id, this.id()).await.map_err(td_error)
+        });
+    }
+
+    fn search_people(&self, query: String) {
+        let this = self.clone();
+        self.spawn(async move {
+            let Users::Users(contacts) =
+                functions::search_contacts(query.clone(), CONTACTS_FOUND, this.id()).await.map_err(td_error)?;
+            let Chats::Chats(public) =
+                functions::search_public_chats(query.clone(), None, this.id()).await.map_err(td_error)?;
+            let mut chats = Vec::new();
+            for user_id in contacts.user_ids {
+                let Chat::Chat(chat) =
+                    functions::create_private_chat(user_id, true, this.id()).await.map_err(td_error)?;
+                chats.push(chat.id);
+            }
+            for chat_id in public.chat_ids {
+                let Chat::Chat(chat) = functions::get_chat(chat_id, this.id()).await.map_err(td_error)?;
+                if matches!(chat.r#type, ChatType::Private(_)) {
+                    chats.push(chat_id);
+                }
+            }
+            chats.retain(|&chat_id| this.is_allowed(chat_id));
+            this.emit(Event::People { query, chats });
+            Ok(())
         });
     }
 

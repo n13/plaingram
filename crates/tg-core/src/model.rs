@@ -199,6 +199,12 @@ pub enum Event {
         message_id: i64,
         reactions: Vec<(SafeText, ReactionId)>,
     },
+    /// Private chats with the people a [`Backend::search_people`] query finds: contacts first, then, from four characters
+    /// on, people whose public username or name matches.
+    People {
+        query: String,
+        chats: Vec<i64>,
+    },
     /// The reactions on a message changed.
     Reactions {
         chat_id: i64,
@@ -317,6 +323,8 @@ pub trait Backend {
     /// Bans a member from a group and deletes all their messages in it, where [`Event::Moderator`] allows it.
     fn ban_sender(&self, chat_id: i64, user_id: i64);
     fn leave_chat(&self, chat_id: i64);
+    /// Finds people to start a chat with, as an [`Event::People`]; bots, groups and channels are left out.
+    fn search_people(&self, query: String);
     /// Emits [`Event::AvailableReactions`].
     fn load_available_reactions(&self, chat_id: i64, message_id: i64);
     /// Adds this account's reaction to a message, or takes it back.

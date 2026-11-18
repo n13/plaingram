@@ -68,6 +68,8 @@ const VIGNETTE_ALPHA: f32 = 0.5;
 const SCANLINE_PITCH: f32 = 3.;
 const SCANLINE_ALPHA: f32 = 0.18;
 const SWITCHER_LIST_HEIGHT: f32 = 420.;
+/// How long typing in the switcher pauses before it searches for people.
+const PEOPLE_SEARCH_DELAY: Duration = Duration::from_millis(300);
 /// Light modules around the code, as the QR standard asks.
 const QR_QUIET_ZONE: usize = 4;
 const API_SETUP_STEPS: [&str; 4] = [
@@ -118,6 +120,10 @@ pub struct Plaingram {
     pub(crate) attachments: Vec<PathBuf>,
     /// The chat switcher, open over everything.
     pub(crate) switcher: Option<Entity<CommandState>>,
+    /// Private chats with the people found for the switcher's query, and that query.
+    found_people: (String, Vec<i64>),
+    /// Waits for typing in the switcher to pause before searching for people.
+    people_search: Option<Task<()>>,
     /// What waits for the user to confirm it, over the chat.
     pub(crate) confirming: Option<Confirm>,
     /// Groups where this account may delete all messages of a member and ban them.
@@ -294,6 +300,8 @@ impl Plaingram {
             overlay: None,
             attachments: Vec::new(),
             switcher: None,
+            found_people: Default::default(),
+            people_search: None,
             confirming: None,
             moderated: HashSet::new(),
             overlay_focus: cx.focus_handle(),
@@ -441,6 +449,7 @@ impl Plaingram {
                     *asked = Some(options);
                 }
             }
+            Event::People { query, chats } => self.found_people = (query, chats),
             Event::AvailableReactions { chat_id, message_id, reactions } => {
                 if let Some(Confirm::React { chat_id: c, message_id: m, choices, .. }) = &mut self.confirming
                     && (*c, *m) == (chat_id, message_id)
@@ -694,6 +703,8 @@ impl Plaingram {
 
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher = None;
+        self.found_people = Default::default();
+        self.people_search = None;
         self.focus_compose(window, cx);
         cx.notify();
     }
@@ -742,6 +753,20 @@ impl Plaingram {
         self.close_confirm(window, cx);
     }
 
+    /// Searches for people to chat with once typing in the switcher pauses.
+    fn search_people(&mut self, query: &str, cx: &mut Context<Self>) {
+        let query = query.trim().to_string();
+        self.people_search = (!query.is_empty()).then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PEOPLE_SEARCH_DELAY).await;
+                if let Err(error) = this.update(cx, |this, _| this.client.search_people(query)) {
+                    tracing::error!("cannot search for people: {error:#}");
+                }
+            })
+        });
+        cx.notify();
+    }
+
     fn jump_to(&mut self, chat_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay = None;
         self.open(chat_id, cx);
@@ -749,9 +774,9 @@ impl Plaingram {
     }
 
     /// Chats whose name starts with `query`, then those that only contain it, ignoring case. Each part goes from the
-    /// most recently opened, then in Telegram's order.
+    /// most recently opened, then in Telegram's order. Then come people found for `query` to start a chat with.
     pub(crate) fn switcher_chats(&self, query: &str) -> Vec<i64> {
-        let query = query.trim().to_lowercase();
+        let (found, query) = (query.trim(), query.trim().to_lowercase());
         let mut ranked: Vec<_> = self
             .chats
             .values()
@@ -767,7 +792,12 @@ impl Plaingram {
             })
             .collect();
         ranked.sort_unstable();
-        ranked.into_iter().map(|(.., id)| id).collect()
+        let mut chats: Vec<_> = ranked.into_iter().map(|(.., id)| id).collect();
+        if self.found_people.0 == found {
+            let people = self.found_people.1.iter().filter(|id| !chats.contains(id) && self.chats.contains_key(id));
+            chats.extend(people.copied().collect::<Vec<_>>());
+        }
+        chats
     }
 
     pub(crate) fn attach(&mut self, files: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
@@ -1428,12 +1458,12 @@ impl Plaingram {
         let app = cx.entity();
         let command = Command::new(switcher)
             .filterable(false)
-            .placeholder("Jump to a chat")
+            .placeholder("Find a chat or person")
             .max_h(px(SWITCHER_LIST_HEIGHT))
             .items(items)
             .on_query({
                 let app = app.clone();
-                move |_, _, cx| app.update(cx, |_, cx| cx.notify())
+                move |query, _, cx| app.update(cx, |this, cx| this.search_people(query, cx))
             })
             .on_confirm(move |ix, window, cx| app.update(cx, |this, cx| this.jump_to(chats[ix.row], window, cx)));
         let switcher = div()
@@ -1608,6 +1638,13 @@ impl Render for Plaingram {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .children(self.fps.as_ref().map(|frames| format!("{} fps", frames.len())))
+                                .child(
+                                    Button::new("find")
+                                        .ghost()
+                                        .icon(IconName::Search)
+                                        .tooltip("Find a chat or person")
+                                        .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx))),
+                                )
                                 .child(
                                     Button::new("settings")
                                         .ghost()
