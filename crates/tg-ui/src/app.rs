@@ -1263,7 +1263,9 @@ impl Plaingram {
         let facts = [
             (
                 "Registered",
-                info.and_then(|i| i.registered).map_or_else(unknown, |(month, year)| month_year(month, year)),
+                info.and_then(|i| i.registered)
+                    .and_then(|(month, year)| month_year(month, year))
+                    .unwrap_or_else(unknown),
             ),
             (
                 "Phone country",
@@ -1488,7 +1490,14 @@ impl Plaingram {
                 .label(label)
                 .on_click(cx.listener(move |this, _, window, cx| this.confirm(for_everyone, window, cx)))
         };
-        let name = |sender| self.sender_name(sender).expect("TDLib sends a user or chat before referring to it");
+        let (this_user, this_chat) = (sanitize("this user"), sanitize("this chat"));
+        let name = |sender| {
+            let fallback = match sender {
+                Sender::User(_) => &this_user,
+                Sender::Chat(_) => &this_chat,
+            };
+            self.sender_name(sender).unwrap_or(fallback)
+        };
         let (question, choices) = match confirm {
             Confirm::Delete { options: Some(DeleteOptions { for_me: false, for_everyone: false }), .. } => {
                 (sanitize("Telegram does not allow deleting this message."), Vec::new())
@@ -1920,8 +1929,8 @@ fn age(date: i32, now: DateTime<Local>) -> String {
     }
 }
 
-fn month_year(month: u32, year: i32) -> String {
-    NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1 to 12").format("%B %Y").to_string()
+fn month_year(month: u32, year: i32) -> Option<String> {
+    Some(NaiveDate::from_ymd_opt(year, month, 1)?.format("%B %Y").to_string())
 }
 
 fn local(date: i32) -> DateTime<Local> {
@@ -1932,7 +1941,7 @@ fn local(date: i32) -> DateTime<Local> {
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::{qr_pixels, timestamp};
+    use super::{month_year, qr_pixels, timestamp};
 
     /// Decodes the drawn code the way a phone camera would, so a wrong module size or quiet zone shows up here.
     #[test]
@@ -1945,6 +1954,13 @@ mod tests {
         let grids = prepared.detect_grids();
         assert_eq!(grids.len(), 1);
         assert_eq!(grids[0].decode().unwrap().1, link);
+    }
+
+    #[test]
+    fn registration_months_outside_the_calendar_show_as_unknown() {
+        assert_eq!(month_year(11, 2026).as_deref(), Some("November 2026"));
+        assert_eq!(month_year(0, 2026), None);
+        assert_eq!(month_year(13, 2026), None);
     }
 
     #[test]
