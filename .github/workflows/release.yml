@@ -33,12 +33,24 @@ jobs:
               libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
           fi
 
+      # The cached TDLib includes a copy of OpenSSL's static libraries, so a new OpenSSL release must rebuild it.
+      - name: Find the OpenSSL version
+        id: openssl
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            version="$(brew list --versions openssl@3)"
+          else
+            version="$(dpkg-query -W -f='${Version}' libssl-dev)"
+          fi
+          test -n "$version"
+          echo "version=${version// /-}" >> "$GITHUB_OUTPUT"
+
       - name: Restore TDLib
         id: tdlib
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tdlib/install
-          key: tdlib-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-tdlib.sh') }}
+          key: tdlib-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-tdlib.sh') }}-${{ steps.openssl.outputs.version }}
 
       - name: Build TDLib
         if: steps.tdlib.outputs.cache-hit != 'true'
@@ -98,6 +110,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS
 
       - name: Publish
         env:
