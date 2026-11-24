@@ -7,13 +7,13 @@ use std::time::Duration;
 use gpui_kit::base::Root;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, ExternalPaths, FileDropEvent, FontFeatures, HeadlessAppContext, IntoElement,
-    KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, PlatformInput,
-    Render, Styled as _, Window, WindowHandle, black, div, point, px, size, white,
+    AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FileDropEvent, FontFeatures, HeadlessAppContext,
+    Image, ImageFormat, IntoElement, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    ParentElement as _, PlatformInput, Render, Styled as _, Window, WindowHandle, black, div, point, px, size, white,
 };
 use tg_core::{AuthStep, Demo, Event, SafeContent, SafeReaction, Sender, sanitize};
 
-use crate::app::{Confirm, Overlay, Plaingram, Viewer};
+use crate::app::{Attachment, Confirm, Overlay, Plaingram, Viewer};
 use crate::theme::{Palette, THEMES};
 
 const SCREENSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/screenshots");
@@ -183,18 +183,24 @@ fn scroll_to(cx: &mut HeadlessAppContext, app: &Entity<Plaingram>, ix: usize) {
     cx.update(|cx| app.update(cx, |app, cx| app.scroller.update(cx, |s, cx| assert!(s.scroll_to_item(ix, cx)))));
 }
 
-/// Demo user 6 copies the name of the contact Bob Jones (4); the impostor (3) copies the handle of Alice Smith (2).
+/// Demo user 6 copies the name of the contact Bob Jones (4); the impostor (3) copies the handle of Alice Smith (2);
+/// user 7 copies this account's name, and @trai1headgear (8) the username of a public channel only Telegram knows.
 #[test]
-fn profiles_warn_about_look_alikes_of_contacts() {
+fn profiles_warn_about_look_alikes_of_anyone() {
     let mut cx = headless();
-    let (_, app) = open_demo(&mut cx, true);
-    let lookalikes = |cx: &mut HeadlessAppContext, user_id| {
-        cx.update(|cx| app.read(cx).lookalikes(user_id).iter().map(|user| user.id).collect::<Vec<_>>())
-    };
-    assert_eq!(lookalikes(&mut cx, 6), [4]);
-    assert_eq!(lookalikes(&mut cx, IMPOSTOR), [2]);
-    assert_eq!(lookalikes(&mut cx, 5), [] as [i64; 0]);
-    assert_eq!(lookalikes(&mut cx, 4), [] as [i64; 0], "contacts are not flagged");
+    let (window, app) = open_demo(&mut cx, true);
+    let lookalikes = |cx: &mut HeadlessAppContext, user_id| cx.update(|cx| app.read(cx).lookalikes(user_id));
+    assert_eq!(lookalikes(&mut cx, 6), ["looks like your contact Bob Jones (@bobj)"]);
+    assert_eq!(lookalikes(&mut cx, IMPOSTOR), ["looks like your contact Alice Smith (@alice_smith)"]);
+    assert_eq!(lookalikes(&mut cx, 7), ["looks like you (@samrivera)"]);
+    assert_eq!(lookalikes(&mut cx, 8), [] as [&str; 0], "Telegram is asked as the profile opens");
+    cx.update(|cx| app.update(cx, |app, cx| app.toggle_profile(8, cx)));
+    draw(&mut cx, window);
+    assert_eq!(lookalikes(&mut cx, 8), ["looks like Trailhead Gear (@trailheadgear), another account"]);
+    screenshot(&mut cx, window, "profile-lookalike");
+    assert_eq!(lookalikes(&mut cx, 5), [] as [&str; 0]);
+    assert_eq!(lookalikes(&mut cx, 4), [] as [&str; 0], "contacts are not flagged");
+    assert_eq!(lookalikes(&mut cx, 1), [] as [&str; 0], "nor is this account");
 }
 
 /// The newest message in the demo group chat is from Bob Jones (4), whose name is at about (330, 554).
@@ -404,7 +410,7 @@ fn dropped_photos_are_attached_and_sent_with_the_caption() {
     };
     let attachments = |cx: &mut HeadlessAppContext| cx.update(|cx| app.read(cx).attachments.clone());
     drop(&mut cx);
-    assert_eq!(attachments(&mut cx), vec![photo.clone()]);
+    assert_eq!(attachments(&mut cx), vec![Attachment::File(photo.clone())]);
     draw(&mut cx, window);
     click(&mut cx, window, 390., 663.);
     assert!(attachments(&mut cx).is_empty(), "x leaves the photo out");
@@ -423,6 +429,34 @@ fn dropped_photos_are_attached_and_sent_with_the_caption() {
     });
     click(&mut cx, window, 318., 698.);
     screenshot(&mut cx, window, "attach-menu");
+}
+
+/// Cmd-V in the message box attaches a copied image, such as a screenshot, with a preview; text still pastes as text.
+#[test]
+fn pasted_images_are_attached_and_text_pastes_as_text() {
+    let mut cx = headless();
+    let (window, app) = open_demo(&mut cx, true);
+    open_chat(&mut cx, &app, GROUP_CHAT);
+    draw(&mut cx, window);
+    click(&mut cx, window, 700., 698.);
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(64, 48, image::Rgba([240, 120, 40, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let image = Image::from_bytes(ImageFormat::Png, png);
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_image(&image)));
+    key(&mut cx, window, "cmd-v");
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("Summit!".into())));
+    key(&mut cx, window, "cmd-v");
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(app.attachments, [Attachment::Pasted(Arc::new(image))]);
+        assert_eq!(app.compose.read(cx).value(), "Summit!");
+    });
+    screenshot(&mut cx, window, "paste");
+    click(&mut cx, window, 1068., 698.);
+    let sent = cx.update(|cx| app.read(cx).messages.last().unwrap().content.clone());
+    assert!(matches!(&sent, SafeContent::Photo { caption, .. } if caption.to_string() == "Summit!"), "{sent:?}");
 }
 
 /// Cmd-K lists the chats opened last first. Typing keeps names that start with the text, then names that contain it.

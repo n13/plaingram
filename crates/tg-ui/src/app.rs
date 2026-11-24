@@ -27,10 +27,10 @@ use gpui_kit::*;
 use tg_core::{
     AuthStep, Backend, ChatKind, ChatListId, DecodedImage, DeleteOptions, Event, Events, PhotoRef, ReactionId,
     SafeAccountInfo, SafeChat, SafeContent, SafeFolder, SafeMessage, SafeProfile, SafeReply, SafeText, SafeTopic,
-    SafeUser, Sender, is_allowed, sanitize,
+    SafeUser, Sender, Upload, is_allowed, sanitize, skeleton,
 };
 
-use crate::safe_text::{name_label, safe_text, warning};
+use crate::safe_text::{handle_font, name_label, safe_text, warning};
 use crate::settings::Settings;
 use crate::theme::{Palette, THEMES};
 
@@ -117,7 +117,7 @@ pub struct Plaingram {
     pub(crate) download_progress: HashMap<i32, f32>,
     pub(crate) overlay: Option<Overlay>,
     /// Photos picked or dropped for the next message.
-    pub(crate) attachments: Vec<PathBuf>,
+    pub(crate) attachments: Vec<Attachment>,
     /// The chat switcher, open over everything.
     pub(crate) switcher: Option<Entity<CommandState>>,
     /// Private chats with the people found for the switcher's query, and that query.
@@ -134,6 +134,8 @@ pub struct Plaingram {
     pub(crate) profiles: HashMap<i64, SafeProfile>,
     /// What Telegram shared about people who messaged first, by user id.
     account_info: HashMap<i64, SafeAccountInfo>,
+    /// Other accounts, by name and username, under usernames a stranger's could pose as, by the stranger's user id.
+    posed: HashMap<i64, Vec<(SafeText, SafeText)>>,
     /// The first and last rows on screen in the frame being drawn.
     visible_rows: Rc<Cell<Option<(usize, usize)>>>,
     /// When each recent frame was drawn and its top row, for the scroll velocity.
@@ -147,6 +149,24 @@ pub struct Plaingram {
     settings_file: PathBuf,
     _subscriptions: [Subscription; 5],
     _tasks: [Task<()>; 2],
+}
+
+/// A photo for the next message.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Attachment {
+    /// Picked, dropped, or copied in the Finder and pasted.
+    File(PathBuf),
+    /// Pasted from the clipboard, such as a screenshot.
+    Pasted(Arc<Image>),
+}
+
+impl Attachment {
+    fn upload(self) -> Upload {
+        match self {
+            Self::File(file) => Upload::File(file),
+            Self::Pasted(image) => Upload::Pasted(Arc::unwrap_or_clone(image).bytes),
+        }
+    }
 }
 
 /// What covers the window below the title bar.
@@ -308,6 +328,7 @@ impl Plaingram {
             profile: None,
             profiles: HashMap::new(),
             account_info: HashMap::new(),
+            posed: HashMap::new(),
             visible_rows: Rc::default(),
             scroll_samples: VecDeque::new(),
             error: None,
@@ -450,6 +471,7 @@ impl Plaingram {
                 }
             }
             Event::People { query, chats } => self.found_people = (query, chats),
+            Event::Lookalikes { user_id, accounts } => _ = self.posed.insert(user_id, accounts),
             Event::AvailableReactions { chat_id, message_id, reactions } => {
                 if let Some(Confirm::React { chat_id: c, message_id: m, choices, .. }) = &mut self.confirming
                     && (*c, *m) == (chat_id, message_id)
@@ -546,7 +568,10 @@ impl Plaingram {
         }
         match self.attachments.is_empty() {
             true => self.client.send_text(chat_id, self.topic, text),
-            false => self.client.send_photos(chat_id, self.topic, std::mem::take(&mut self.attachments), text),
+            false => {
+                let photos = std::mem::take(&mut self.attachments).into_iter().map(Attachment::upload).collect();
+                self.client.send_photos(chat_id, self.topic, photos, text)
+            }
         }
         self.compose.update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -801,8 +826,26 @@ impl Plaingram {
     }
 
     pub(crate) fn attach(&mut self, files: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
-        self.attachments.extend(files);
+        self.attachments.extend(files.into_iter().map(Attachment::File));
         cx.notify();
+    }
+
+    /// Attaches a pasted image, or files copied in the Finder, and takes the paste from the message box; text pastes
+    /// into it as usual.
+    fn paste(&mut self, clipboard: &ClipboardItem, cx: &mut Context<Self>) -> bool {
+        let pasted: Vec<_> = clipboard
+            .entries()
+            .iter()
+            .flat_map(|entry| match entry {
+                ClipboardEntry::Image(image) => vec![Attachment::Pasted(Arc::new(image.clone()))],
+                ClipboardEntry::ExternalPaths(files) => files.paths().iter().cloned().map(Attachment::File).collect(),
+                ClipboardEntry::String(_) => Vec::new(),
+            })
+            .collect();
+        let taken = !pasted.is_empty();
+        self.attachments.extend(pasted);
+        cx.notify();
+        taken
     }
 
     fn pick_photos(&mut self, cx: &mut Context<Self>) {
@@ -834,9 +877,12 @@ impl Plaingram {
         cx.notify();
     }
 
-    /// Contacts whose name or handle looks like the name or handle of `user_id`, when that user is not a contact.
-    pub(crate) fn lookalikes(&self, user_id: i64) -> Vec<&SafeUser> {
-        let Some(user) = self.users.get(&user_id).filter(|user| !user.is_contact) else { return Vec::new() };
+    /// Warnings for stranger `user_id`: contacts, then you and everyone else plaingram knows, whose name or handle folds
+    /// to the same [`skeleton`] as theirs, then accounts Telegram has under usernames theirs could pose as.
+    pub(crate) fn lookalikes(&self, user_id: i64) -> Vec<String> {
+        let Some(user) = self.users.get(&user_id).filter(|u| !u.is_contact && !self.is_me(u.id)) else {
+            return Vec::new();
+        };
         let skeletons = |u: &SafeUser| -> Vec<String> {
             [Some(&u.name), u.username.as_ref()]
                 .into_iter()
@@ -846,7 +892,24 @@ impl Plaingram {
                 .collect()
         };
         let suspect = skeletons(user);
-        self.users.values().filter(|c| c.is_contact && skeletons(c).iter().any(|s| suspect.contains(s))).collect()
+        let mut known: Vec<_> = self
+            .users
+            .values()
+            .filter(|other| other.id != user_id && skeletons(other).iter().any(|s| suspect.contains(s)))
+            .map(|other| (!other.is_contact, handle(other), other))
+            .collect();
+        known.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        let posed =
+            self.posed.get(&user_id).into_iter().flatten().map(|(name, username)| (name, format!("@{username}")));
+        let posed = posed
+            .filter(|(_, posed)| !known.iter().any(|(_, handle, _)| handle == posed))
+            .map(|(name, handle)| format!("looks like {name} ({handle}), another account"));
+        let known = known.iter().map(|(_, handle, other)| match other.is_contact {
+            true => format!("looks like your contact {} ({handle})", other.name),
+            false if self.is_me(other.id) => format!("looks like you ({handle})"),
+            false => format!("looks like {} ({handle}), another account", other.name),
+        });
+        known.chain(posed).collect()
     }
 
     fn folder(&self) -> ChatListId {
@@ -890,10 +953,9 @@ impl Plaingram {
 
     fn person_note(&self, user_id: i64) -> String {
         let Some(user) = self.users.get(&user_id) else { return format!("id {user_id}") };
-        let handle = user.username.as_ref().map_or_else(|| format!("id {user_id}"), |name| format!("@{name}"));
         let bot = if user.is_bot { " · bot" } else { "" };
         let contact = if user.is_contact { "" } else { " · not a contact" };
-        format!("{handle}{bot}{contact}")
+        format!("{}{bot}{contact}", handle(user))
     }
 
     fn render_login(&self, cx: &mut Context<Self>) -> Div {
@@ -1063,6 +1125,7 @@ impl Plaingram {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(Button::new("attach").ghost().label("+").dropdown_menu_with_anchor(Anchor::BottomLeft, {
+                        let app = app.clone();
                         move |menu, _, _| {
                             let app = app.clone();
                             menu.item(PopupMenuItem::new("Add image").on_click(move |_, _, cx| {
@@ -1070,7 +1133,11 @@ impl Plaingram {
                             }))
                         }
                     }))
-                    .child(Input::new(&self.compose).flex_1())
+                    .child(
+                        Input::new(&self.compose)
+                            .flex_1()
+                            .on_paste(move |clipboard, _, cx| app.update(cx, |this, cx| this.paste(clipboard, cx))),
+                    )
                     .child(
                         Button::new("send")
                             .primary()
@@ -1084,14 +1151,20 @@ impl Plaingram {
     /// Previews of the photos going with the next message, each with 'x' to leave it out.
     fn render_attachments(&self, cx: &mut Context<Self>) -> Div {
         h_flex().px_2().pt_2().gap_2().border_t_1().border_color(cx.theme().border).children(
-            self.attachments.iter().enumerate().map(|(ix, file)| {
-                let name = sanitize(&file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+            self.attachments.iter().enumerate().map(|(ix, attachment)| {
+                let (preview, name) = match attachment {
+                    Attachment::File(file) => (
+                        img(file.clone()),
+                        sanitize(&file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+                    ),
+                    Attachment::Pasted(image) => (img(image.clone()), sanitize("pasted")),
+                };
                 v_flex()
                     .w(px(ATTACHMENT_SIZE))
                     .gap_1()
                     .text_xs()
                     .child(
-                        img(file.clone())
+                        preview
                             .size(px(ATTACHMENT_SIZE))
                             .object_fit(ObjectFit::Contain)
                             .with_fallback(|| div().child("no preview").into_any_element()),
@@ -1228,7 +1301,7 @@ impl Plaingram {
     fn render_sender(&self, ix: usize, message: &SafeMessage, app: &Entity<Self>, cx: &App) -> Div {
         let time = timestamp(message.date, Local::now());
         let row = h_flex().gap_2().text_xs();
-        let muted = |text: String| div().text_color(cx.theme().muted_foreground).child(text);
+        let muted = |text: String| handle_font(div().text_color(cx.theme().muted_foreground).child(text), cx);
         if message.outgoing {
             return row.child("You").child(muted(time));
         }
@@ -1319,10 +1392,7 @@ impl Plaingram {
             .children(user.map(|user| identity(user, cx)))
             .child(div().text_xs().text_color(muted).child(status.chain(labels.into_iter().copied()).collect::<Vec<_>>().join(" · ")))
             .children(alarms.into_iter().map(|label| warning(format!("Telegram marks this account {label}"), cx)))
-            .children(self.lookalikes(user_id).into_iter().map(|contact| {
-                let handle = contact.username.as_ref().map_or_else(|| format!("id {}", contact.id), |u| format!("@{u}"));
-                warning(format!("looks like your contact {} ({handle})", contact.name), cx)
-            }))
+            .children(self.lookalikes(user_id).into_iter().map(|text| handle_font(warning(text, cx), cx)))
             .when_some(profile.filter(|p| !p.bio.is_empty()), |el, p| el.child(safe_text(&p.bio, cx)))
             .children(facts.into_iter().map(|(label, value)| fact(label, value, muted)))
             .when(info.is_none(), |el| {
@@ -1823,15 +1893,21 @@ fn download(content: &SafeContent, date: i32, app: &Entity<Plaingram>) -> Option
 
 /// A chat's name with its badges, over what kind of chat it is.
 fn chat_label(title: &SafeText, note: String, cx: &App) -> Div {
-    v_flex().child(name_label(title, cx)).child(div().text_xs().text_color(cx.theme().muted_foreground).child(note))
+    v_flex()
+        .child(name_label(title, cx))
+        .child(handle_font(div().text_xs().text_color(cx.theme().muted_foreground).child(note), cx))
+}
+
+/// `@username`, or `id 42` for someone without one.
+fn handle(user: &SafeUser) -> String {
+    user.username.as_ref().map_or_else(|| format!("id {}", user.id), |u| format!("@{u}"))
 }
 
 /// A name and @handle, each with its badges.
 fn identity(user: &SafeUser, cx: &App) -> Div {
-    v_flex()
-        .gap_1()
-        .child(name_label(&user.name, cx))
-        .when_some(user.username.as_ref(), |el, handle| el.child(h_flex().child("@").child(name_label(handle, cx))))
+    v_flex().gap_1().child(name_label(&user.name, cx)).when_some(user.username.as_ref(), |el, handle| {
+        el.child(handle_font(h_flex().child("@").child(name_label(handle, cx)), cx))
+    })
 }
 
 /// A labelled value in the profile or settings.
@@ -1920,19 +1996,6 @@ fn age(date: i32, now: DateTime<Local>) -> String {
     }
 }
 
-/// Folds case, punctuation and look-alike characters, so "a1ice_smith_" and "Alice Smith" compare equal.
-fn skeleton(text: &str) -> String {
-    let text = text.to_lowercase().replace("rn", "m");
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| match c {
-            '0' => 'o',
-            '1' | 'i' => 'l',
-            c => c,
-        })
-        .collect()
-}
-
 fn month_year(month: u32, year: i32) -> String {
     NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1 to 12").format("%B %Y").to_string()
 }
@@ -1945,7 +2008,7 @@ fn local(date: i32) -> DateTime<Local> {
 mod tests {
     use chrono::{Local, TimeZone as _};
 
-    use super::{qr_pixels, skeleton, timestamp};
+    use super::{qr_pixels, timestamp};
 
     /// Decodes the drawn code the way a phone camera would, so a wrong module size or quiet zone shows up here.
     #[test]
@@ -1972,15 +2035,5 @@ mod tests {
         assert_eq!(ago(86399), "23h ago");
         let absolute = ago(86400);
         assert!(absolute.starts_with("2027-01-1") && absolute.len() == 16, "{absolute}");
-    }
-
-    #[test]
-    fn skeletons_fold_look_alike_names_and_handles() {
-        assert_eq!(skeleton("Alice Smith"), skeleton("alice_smith_"));
-        assert_eq!(skeleton("a1ice.smith"), skeleton("AIice Smith"));
-        assert_eq!(skeleton("B0b Jones"), skeleton("bobjones"));
-        assert_eq!(skeleton("Mike"), skeleton("rnike"));
-        assert_ne!(skeleton("Alice Smith"), skeleton("Alice Smyth"));
-        assert_eq!(skeleton("\u{1F60A} ???"), "");
     }
 }

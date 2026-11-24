@@ -11,6 +11,8 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
+use crate::model::Upload;
+
 const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
 const MAX_SIDE: usize = 4096;
 const JPEG_QUALITY: u8 = 95;
@@ -52,11 +54,14 @@ fn encode(pixels: &[u8], width: u32, height: u32, color: ColorType) -> Result<Ve
     Ok(jpeg)
 }
 
-/// Writes the user's photo `file` to `out` as Telegram gets it, and returns its size: turned upright as the camera
+/// Writes the user's `photo` to `out` as Telegram gets it, and returns its size: turned upright as the camera
 /// recorded, at most [`UPLOAD_MAX_SIDE`], transparency on white, and a new JPEG, so no metadata such as location or
 /// camera leaves the computer.
-pub(crate) fn prepare_upload(file: &Path, out: &Path) -> Result<(u32, u32)> {
-    let mut image = decode_file(file, out)?;
+pub(crate) fn prepare_upload(photo: &Upload, out: &Path) -> Result<(u32, u32)> {
+    let mut image = match photo {
+        Upload::File(file) => decode_file(file, out)?,
+        Upload::Pasted(bytes) => decode_upright(bytes).context("cannot read the pasted image as a photo")?,
+    };
     if image.width().max(image.height()) > UPLOAD_MAX_SIDE {
         image = image.resize(UPLOAD_MAX_SIDE, UPLOAD_MAX_SIDE, FilterType::CatmullRom);
     }
@@ -190,7 +195,7 @@ mod tests {
     fn upload(name: &str, bytes: &[u8]) -> ((u32, u32), Vec<u8>) {
         let (file, out) = (test_dir().join(name), test_dir().join(format!("{name}.out.jpg")));
         fs::write(&file, bytes).unwrap();
-        let size = prepare_upload(&file, &out).unwrap();
+        let size = prepare_upload(&Upload::File(file), &out).unwrap();
         (size, fs::read(out).unwrap())
     }
 
@@ -207,6 +212,14 @@ mod tests {
     fn uploads_are_turned_upright_before_their_metadata_is_dropped() {
         let (size, jpeg) = upload("portrait.jpg", &portrait_jpeg());
         assert_upright(size, &jpeg);
+    }
+
+    #[test]
+    fn pasted_images_upload_like_files() {
+        let out = test_dir().join("pasted.out.jpg");
+        let size = prepare_upload(&Upload::Pasted(portrait_jpeg()), &out).unwrap();
+        assert_upright(size, &fs::read(&out).unwrap());
+        assert!(prepare_upload(&Upload::Pasted(b"<svg/>".to_vec()), &out).is_err(), "only formats it decodes");
     }
 
     #[test]

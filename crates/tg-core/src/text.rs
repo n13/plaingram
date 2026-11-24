@@ -176,15 +176,31 @@ fn mixes_case(raw: &str) -> bool {
         .any(|word| word.chars().any(char::is_lowercase) && word.chars().skip(1).any(char::is_uppercase))
 }
 
+/// Telegram usernames ignore case and hold only `a`-`z`, `0`-`9` and `_`, so one shows in lowercase, where `I` and `l`
+/// differ, and anything else in it is replaced.
+pub fn sanitize_username(raw: &str) -> SafeText {
+    build(&raw.to_ascii_lowercase(), |grapheme| {
+        let allowed = grapheme.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        (!allowed).then(|| replace(grapheme, Reason::NotAllowed))
+    })
+}
+
 fn sanitize_with(raw: &str, per_word: bool) -> SafeText {
-    let mut segments = Vec::new();
     let mut first = None;
-    for grapheme in raw.graphemes(true) {
+    build(raw, |grapheme| {
         let is_space = grapheme.chars().all(|c| c.is_ascii_whitespace());
         if per_word && is_space {
             first = None;
         }
-        match (if is_space { None } else { special(grapheme, &mut first) }, segments.last_mut()) {
+        if is_space { None } else { special(grapheme, &mut first) }
+    })
+}
+
+/// Joins the graphemes `special` lets through as plain text into runs.
+fn build(raw: &str, mut special: impl FnMut(&str) -> Option<Segment>) -> SafeText {
+    let mut segments = Vec::new();
+    for grapheme in raw.graphemes(true) {
+        match (special(grapheme), segments.last_mut()) {
             (Some(segment), _) => segments.push(segment),
             (None, Some(Segment::Text(text))) => text.push_str(grapheme),
             (None, _) => segments.push(Segment::Text(grapheme.into())),
@@ -307,6 +323,24 @@ mod tests {
             assert_eq!(sanitize_name(raw).to_string(), shown, "{raw}");
         }
         assert_eq!(sanitize("AIice").to_string(), "AIice", "messages keep their case");
+    }
+
+    #[test]
+    fn usernames_show_in_lowercase_with_only_what_telegram_allows() {
+        for (raw, shown) in [
+            ("durov", "durov"),
+            ("DUROV", "durov"),
+            ("PaveI_Durov", "pavei_durov"),
+            ("dur0v_1", "dur0v_1"),
+            ("dur\u{043E}v", "dur?v"),
+            ("d\u{00FC}rov", "d?rov"),
+            ("dur.ov", "dur?ov"),
+            ("dur\u{200B}ov", "dur?ov"),
+            ("pavel durov", "pavel?durov"),
+        ] {
+            assert_eq!(sanitize_username(raw).to_string(), shown, "{raw}");
+        }
+        assert_eq!(sanitize_username("dur\u{043E}v").segments(), [text("dur"), replaced("\u{043E}"), text("v")]);
     }
 
     #[test]

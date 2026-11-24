@@ -170,6 +170,15 @@ pub struct SafeReaction {
     pub id: Option<ReactionId>,
 }
 
+/// A photo for [`Backend::send_photos`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Upload {
+    /// A file the user picked or dropped.
+    File(std::path::PathBuf),
+    /// An image pasted from the clipboard, in a format such as PNG; only its re-encoded JPEG is written to disk.
+    Pasted(Vec<u8>),
+}
+
 /// The message another message replies to, or the quoted part of it.
 #[derive(Clone, Debug)]
 pub struct SafeReply {
@@ -204,6 +213,12 @@ pub enum Event {
     People {
         query: String,
         chats: Vec<i64>,
+    },
+    /// Other accounts, by name and username, under usernames stranger `user_id`'s could pose as, such as `alchemist` for
+    /// `a1chemist`, found as their profile opened.
+    Lookalikes {
+        user_id: i64,
+        accounts: Vec<(SafeText, SafeText)>,
     },
     /// The reactions on a message changed.
     Reactions {
@@ -330,8 +345,8 @@ pub trait Backend {
     /// Adds this account's reaction to a message, or takes it back.
     fn react(&self, chat_id: i64, message_id: i64, reaction: ReactionId, add: bool);
     fn send_text(&self, chat_id: i64, topic: Option<i32>, text: String);
-    /// Sends each file as a photo, upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
-    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<std::path::PathBuf>, caption: String);
+    /// Sends each photo upright, scaled to Telegram's limit and re-encoded as JPEG; `caption` goes with the first.
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, photos: Vec<Upload>, caption: String);
     /// Downloads and decodes a photo, as an [`Event::Photo`]; photos on screen download before the rest.
     fn load_photo(&self, file_id: i32, on_screen: bool);
     /// Moves a photo [`Self::load_photo`] is downloading ahead of the rest, as it came on screen.
@@ -340,6 +355,7 @@ pub trait Backend {
     fn save_photo(&self, file_id: i32, name: String);
     /// Saves a file to ~/Downloads as `name`, or as TDLib named it when `name` is empty.
     fn save_file(&self, file_id: i32, name: String);
-    /// Loads a user's full profile, as an [`Event::Profile`].
+    /// Loads a user's full profile, as an [`Event::Profile`]. For a stranger whose username swaps in digits or letters for
+    /// others, then asks Telegram once a session for the usernames it could pose as, as an [`Event::Lookalikes`].
     fn load_profile(&self, user_id: i64);
 }

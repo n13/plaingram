@@ -34,3 +34,8 @@ pub fn name_label(name: &SafeText, cx: &App) -> Div {
 pub fn warning(text: String, cx: &App) -> Div {
     div().px_1().text_xs().bg(cx.theme().danger).text_color(cx.theme().danger_foreground).child(text)
 }
+
+/// Puts @usernames in the monospace font in every theme, where `0`/`o`, `1`/`l` and `rn`/`m` look different.
+pub fn handle_font<E: Styled>(element: E, cx: &App) -> E {
+    element.font_family(cx.theme().mono_font_family.clone())
+}

@@ -10,7 +10,7 @@ use crate::model::{
     ChatKind, ChatListId, PhotoRef, ReactionId, SafeAccountInfo, SafeChat, SafeContent, SafeFile, SafeFolder,
     SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
 };
-use crate::text::{SafeText, sanitize, sanitize_name};
+use crate::text::{SafeText, sanitize, sanitize_name, sanitize_username};
 
 const MAX_PHOTO_SIDE: i32 = 1280;
 
@@ -51,10 +51,15 @@ pub(crate) fn user(user: &types::User) -> SafeUser {
     SafeUser {
         id: user.id,
         name: sanitize_name(&full_name(user)),
-        username: user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(|u| sanitize_name(u)),
+        username: username(user).map(sanitize_username),
         is_contact: user.is_contact,
         is_bot: matches!(user.r#type, UserType::Bot(_)),
     }
+}
+
+/// The username Telegram shows first.
+pub(crate) fn username(user: &types::User) -> Option<&str> {
+    user.usernames.as_ref().and_then(|u| u.active_usernames.first()).map(String::as_str)
 }
 
 pub(crate) fn profile(user: &types::User, full: &types::UserFullInfo, photos: &types::ChatPhotos) -> SafeProfile {

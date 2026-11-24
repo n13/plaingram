@@ -1,16 +1,17 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::client::Events;
 use crate::image::DecodedImage;
+use crate::lookalike::Checked;
 use crate::model::{
     AuthStep, Backend, ChatKind, ChatListId, DeleteOptions, Event, PhotoRef, ReactionId, SafeAccountInfo, SafeChat,
     SafeContent, SafeFile, SafeFolder, SafeMessage, SafeProfile, SafeReaction, SafeReply, SafeTopic, SafeUser, Sender,
+    Upload,
 };
 use crate::policy;
-use crate::text::{is_allowed, sanitize, sanitize_name};
+use crate::text::{is_allowed, sanitize, sanitize_name, sanitize_username};
 
 const ME: i64 = 1;
 /// "Alice Smith" with a Cyrillic "А", posing as the contact Alice Smith (user 2).
@@ -23,6 +24,10 @@ const HIKING: i64 = 11;
 const FORUM: i64 = 15;
 const PAYPAL: i64 = 13;
 const SAVED_MESSAGES: i64 = 16;
+/// "Sam Rivera", posing as this account in the hiking group it moderates.
+const FAKE_ME: i64 = 7;
+/// @trai1headgear, posing as the public @trailheadgear.
+const FAKE_SHOP: i64 = 8;
 const DEMO_SPACING: i32 = 5 * 3600;
 /// How long a query must be before Telegram also searches public usernames.
 const PUBLIC_SEARCH_LENGTH: usize = 4;
@@ -55,12 +60,13 @@ pub struct Demo {
     events: async_channel::Sender<Event>,
     /// Reactions changed since the demo started, by chat and message.
     reactions: RefCell<HashMap<(i64, i64), Vec<SafeReaction>>>,
+    checked: Checked,
 }
 
 impl Demo {
     pub fn start(signed_in: bool) -> (Self, Events) {
         let (events, receiver) = async_channel::unbounded();
-        let demo = Self { events, reactions: RefCell::default() };
+        let demo = Self { events, reactions: RefCell::default(), checked: Checked::default() };
         if signed_in {
             demo.sign_in()
         } else {
@@ -76,7 +82,7 @@ impl Demo {
             self.emit(Event::User(SafeUser {
                 id,
                 name: sanitize_name(name),
-                username: username.map(sanitize_name),
+                username: username.map(sanitize_username),
                 is_contact,
                 is_bot: false,
             }));
@@ -186,6 +192,21 @@ impl Backend for Demo {
             groups_in_common,
             labels,
         }));
+        let stranger = PEOPLE.into_iter().find(|&(id, .., is_contact)| id == user_id && !is_contact);
+        let lookups = stranger.and_then(|(_, _, username, _)| username).map(|u| self.checked.lookups(u));
+        let accounts: Vec<_> = lookups
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|posed| {
+                let people = PEOPLE.into_iter().filter(|&(id, ..)| id != user_id).map(|(_, name, u, _)| (name, u));
+                let mut public = PUBLIC_CHATS.into_iter().map(|(title, u)| (title, Some(u))).chain(people);
+                let (name, _) = public.find(|&(_, username)| username == Some(posed.as_str()))?;
+                Some((sanitize_name(name), sanitize_username(&posed)))
+            })
+            .collect();
+        if !accounts.is_empty() {
+            self.emit(Event::Lookalikes { user_id, accounts });
+        }
     }
 
     fn load_older(&self, chat_id: i64, topic: Option<i32>, before: i64) {
@@ -295,9 +316,9 @@ impl Backend for Demo {
     }
 
     /// Shows each file as the demo photo, without reading it.
-    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<PathBuf>, caption: String) {
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, photos: Vec<Upload>, caption: String) {
         let mut caption = Some(sanitize(&caption));
-        for id in (1001..).take(files.len()) {
+        for id in (1001..).take(photos.len()) {
             let content = SafeContent::Photo { photo: PHOTO, caption: caption.take().unwrap_or_default() };
             self.emit(Event::Message(message(chat_id, topic, id, ME, content, now())));
         }
@@ -391,14 +412,19 @@ fn message(chat_id: i64, topic: Option<i32>, id: i64, from: i64, content: SafeCo
 }
 
 /// Everyone the demo knows: id, name, @username and whether they are a contact.
-const PEOPLE: [(i64, &str, Option<&str>, bool); 6] = [
+const PEOPLE: [(i64, &str, Option<&str>, bool); 8] = [
     (ME, "Sam Rivera", Some("samrivera"), false),
     (2, "Alice Smith", Some("alice_smith"), true),
     (IMPOSTOR, "\u{0410}lice Smith", Some("alice_smith_"), false),
     (4, "Bob Jones", Some("bobj"), true),
     (6, "Bob Jones", Some("bobjones_support"), false),
     (5, "P\u{0430}ypal Support", None, false),
+    (FAKE_ME, "Sam Rivera", Some("sam_rivera_"), false),
+    (FAKE_SHOP, "Trailhead Gear", Some("trai1headgear"), false),
 ];
+
+/// Public channels and groups the account is not in: title and @username.
+const PUBLIC_CHATS: [(&str, &str); 1] = [("Trailhead Gear", "trailheadgear")];
 
 /// A demo chat: id, kind, title, unread messages, order and the lists it is in.
 type DemoChat = (i64, ChatKind, &'static str, i32, i64, Vec<ChatListId>);

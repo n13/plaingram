@@ -16,10 +16,11 @@ use td::{functions, types};
 use tokio::runtime::Runtime;
 
 use crate::image::{decode_jpeg, encode_jpeg, prepare_upload};
-use crate::model::{AuthStep, Backend, DeleteOptions, Event, ReactionId};
+use crate::lookalike::Checked;
+use crate::model::{AuthStep, Backend, DeleteOptions, Event, ReactionId, Upload};
 use crate::paths;
 use crate::policy;
-use crate::text::{is_allowed, sanitize, sanitize_name};
+use crate::text::{is_allowed, sanitize, sanitize_name, sanitize_username};
 
 const HISTORY_SIZE: usize = 50;
 const OLDER_SIZE: usize = 100;
@@ -30,6 +31,8 @@ const REACTIONS_PER_ROW: i32 = 8;
 /// How many recently opened chats TDLib keeps.
 const RECENT_CHATS: i32 = 50;
 const TDLIB_PAGE_LIMIT: usize = 100;
+/// What Telegram answers when no account has a username.
+const NO_SUCH_USERNAME: [&str; 2] = ["USERNAME_NOT_OCCUPIED", "USERNAME_INVALID"];
 /// TDLib's download priorities: photos on screen and saved files go before photos about to come on screen.
 const PRIORITY_ON_SCREEN: i32 = 32;
 const PRIORITY_AHEAD: i32 = 1;
@@ -99,6 +102,7 @@ pub struct Client {
     allowed: Arc<Mutex<Allowed>>,
     /// Re-encoded photos being sent, by the temporary id of their message, to delete once the send ends.
     uploads: Arc<Mutex<HashMap<i64, PathBuf>>>,
+    checked: Arc<Checked>,
 }
 
 impl Client {
@@ -113,6 +117,7 @@ impl Client {
             events,
             allowed: Arc::default(),
             uploads: Arc::default(),
+            checked: Arc::default(),
         };
         client.start_tdlib();
         let worker = client.clone();
@@ -358,14 +363,14 @@ impl Backend for Client {
         });
     }
 
-    fn send_photos(&self, chat_id: i64, topic: Option<i32>, files: Vec<PathBuf>, caption: String) {
+    fn send_photos(&self, chat_id: i64, topic: Option<i32>, photos: Vec<Upload>, caption: String) {
         let this = self.clone();
         self.spawn(async move {
             let mut caption = Some(formatted(caption)?).filter(|c| !c.text.is_empty());
-            for file in files {
+            for photo in photos {
                 let out = paths::upload_path(&this.data_dir)?;
                 let (path, local) = (out.clone(), out.to_str().context("upload path is not UTF-8")?.to_owned());
-                let (width, height) = tokio::task::spawn_blocking(move || prepare_upload(&file, &path)).await??;
+                let (width, height) = tokio::task::spawn_blocking(move || prepare_upload(&photo, &path)).await??;
                 let content = InputMessageContent::InputMessagePhoto(types::InputMessagePhoto {
                     photo: types::InputPhoto {
                         photo: InputFile::Local(types::InputFileLocal { path: local }),
@@ -432,6 +437,21 @@ impl Backend for Client {
             let ChatPhotos::ChatPhotos(photos) =
                 functions::get_user_profile_photos(user_id, 0, 100, id).await.map_err(td_error)?;
             this.emit(Event::Profile(policy::profile(&user, &full, &photos)));
+            let lookups = policy::username(&user).filter(|_| !user.is_contact).map(|u| this.checked.lookups(u));
+            let mut accounts = Vec::new();
+            for posed in lookups.unwrap_or_default() {
+                match functions::search_public_chat(posed.clone(), id).await {
+                    Ok(Chat::Chat(chat)) if !matches!(chat.r#type, ChatType::Private(ref p) if p.user_id == user_id) => {
+                        accounts.push((sanitize_name(&chat.title), sanitize_username(&posed)))
+                    }
+                    Ok(_) => {}
+                    Err(error) if NO_SUCH_USERNAME.contains(&error.message.as_str()) => {}
+                    Err(error) => return Err(td_error(error)),
+                }
+            }
+            if !accounts.is_empty() {
+                this.emit(Event::Lookalikes { user_id, accounts });
+            }
             Ok(())
         });
     }
