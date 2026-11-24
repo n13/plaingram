@@ -4,7 +4,7 @@ members = ["crates/td", "crates/td-gen", "crates/tg-core", "crates/tg-ui"]
 exclude = ["vendor/zune-jpeg"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 publish = false
 license = "MIT"
